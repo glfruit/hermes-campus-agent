@@ -1,3 +1,21 @@
+# Hermes Campus Agent Overlay
+
+This fork is being used to build Hermes Campus Agent: a lightweight, extensible AI campus platform for teaching management and teacher daily work.
+
+Campus-specific instructions take precedence over the upstream Hermes guide below:
+
+- 用中文回答项目问题，除非用户明确要求英文。
+- Read `PRODUCT.md`, `DESIGN.md`, and `docs/campus/2026-05-26-initial-plan.md` before product, architecture, or UI work.
+- Use `CONTEXT.md` and `docs/agents/*.md` for domain language, issue tracker, triage labels, and agent-skill conventions.
+- Use OpenSpec for major changes through `.codex/skills/openspec-*` or `.claude/skills/openspec-*`.
+- Follow `docs/campus/development-workflow.md` for project workflow, skill routing, prototype rules, and review gates.
+- Use `impeccable`, `design-md`, `frontend-design`, `frontend-patterns`, Matt Pocock skills, Vercel skills, and Stitch skills according to the workflow document.
+- Treat Hermes as the agent runtime and orchestration layer, not the final authority for campus business rules.
+- Strong-rule workflows require structured state, code validation, permissions, audit logs, and human confirmation.
+- Do not automate grade changes, disciplinary decisions, scholarship decisions, psychological risk handling, personnel decisions, finance payments, or official notice publication.
+
+---
+
 # Hermes Agent - Development Guide
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
