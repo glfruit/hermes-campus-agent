@@ -75,6 +75,22 @@ Use design and frontend skills for Web work:
 8. Record decisions.
    Add ADRs under `docs/adr/` for durable architecture decisions. Update `CONTEXT.md`, `PRODUCT.md`, or `DESIGN.md` when the project language changes.
 
+## Research Capture
+
+When a feature may support a paper, record the research material while building it instead of reconstructing it later.
+
+Capture:
+
+- The problem statement and why the existing Hermes/agent/workflow/RAG approach was insufficient.
+- The design alternatives considered and why one was chosen.
+- The workflow state model, permission boundary, source-citation behavior, and human-review design.
+- Evaluation data, including task success, time saved, citation accuracy, user corrections, latency, and cost.
+- Negative cases, failed prototypes, and tradeoffs. These are often more publishable than polished demos.
+
+Never capture identifiable student, teacher, staff, psychological, disciplinary, financial, or personnel data in research notes. Use synthetic data, anonymized aggregates, or controlled scenarios unless formal institutional approval exists.
+
+For paper work, follow `docs/research/paper-roadmap.md`.
+
 ## First-Release Work Breakdown
 
 Start with these slices:
@@ -107,4 +123,3 @@ Do not mark a feature done until these are true:
 - Creating complex multi-agent automation before the first workflow state model is observable.
 - Keeping throwaway prototypes in the main product path.
 - Installing a UI library without first proving it matches the product's operational design needs.
-

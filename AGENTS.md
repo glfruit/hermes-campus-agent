@@ -10,6 +10,7 @@ Campus-specific instructions take precedence over the upstream Hermes guide belo
 - Use OpenSpec for major changes through `.codex/skills/openspec-*` or `.claude/skills/openspec-*`.
 - Follow `docs/campus/development-workflow.md` for project workflow, skill routing, prototype rules, and review gates.
 - Use `impeccable`, `design-md`, `frontend-design`, `frontend-patterns`, Matt Pocock skills, Vercel skills, and Stitch skills according to the workflow document.
+- Use `docs/research/paper-roadmap.md` when development work may become research material.
 - Treat Hermes as the agent runtime and orchestration layer, not the final authority for campus business rules.
 - Strong-rule workflows require structured state, code validation, permissions, audit logs, and human confirmation.
 - Do not automate grade changes, disciplinary decisions, scholarship decisions, psychological risk handling, personnel decisions, finance payments, or official notice publication.

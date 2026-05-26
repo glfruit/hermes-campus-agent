@@ -53,6 +53,10 @@ This repo uses a single-context domain layout with root `CONTEXT.md` and root `d
 
 Follow `docs/campus/development-workflow.md` for project workflow, skill routing, prototype rules, and review gates.
 
+## Research Workflow
+
+Use `docs/research/paper-roadmap.md` when project work may become paper material. For Codex, prefer the `academic-research-suite` router when scoping, writing, reviewing, or checking papers. For shared-agent workflows, use `academic-pipeline`, `deep-research`, `academic-paper`, `academic-paper-reviewer`, `literature-review`, `scholar-evaluation`, and `citation-audit` as appropriate.
+
 ## Guardrails
 
 - Do not automate grade changes, disciplinary decisions, scholarship decisions, psychological risk handling, personnel decisions, finance payments, or official notice publication.
