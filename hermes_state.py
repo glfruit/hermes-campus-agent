@@ -2235,6 +2235,20 @@ class SessionDB:
             if row is not None:
                 return dict(row)
 
+            # Profile-multiplexed gateway keys use the namespace slot
+            # ``agent:<profile>:...``.  Once an inbound message is routed to a
+            # named profile, recovering by peer tuple alone is unsafe: the same
+            # Telegram/Discord user can have live sessions in multiple profiles
+            # on the same gateway, and the peer tuple cannot distinguish them.
+            # In that case exact session_key recovery is the only safe recovery;
+            # otherwise a stale edu-tl route can resume a live dev-ops session.
+            try:
+                namespace = session_key.split(":", 2)[1]
+            except (AttributeError, IndexError):
+                namespace = ""
+            if namespace and namespace != "main":
+                return None
+
             # Conservative fallback for rows created by current code but with a
             # temporarily-missing exact key: still require the complete peer
             # tuple so we never cross chats/threads/users.
