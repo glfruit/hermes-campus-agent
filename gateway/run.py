@@ -8309,6 +8309,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception as e:
                 logger.error("✗ %s error (profile: %s): %s", platform.value, profile_name, e)
                 await self._safe_adapter_disconnect(adapter, platform)
+        if connected:
+            try:
+                from gateway.status import write_runtime_status
+
+                # Platform status writes merge into the profile's existing
+                # gateway_state.json. A previous shutdown/drain can leave the
+                # profile-level file at "draining"; clear that transient state
+                # once this multiplexed profile is accepting traffic again.
+                with _profile_runtime_scope(profile_home):
+                    write_runtime_status(
+                        gateway_state="running",
+                        exit_reason=None,
+                        restart_requested=self._restart_requested,
+                        active_agents=0,
+                    )
+            except Exception:
+                logger.debug(
+                    "could not mark profile %s runtime status running",
+                    profile_name,
+                    exc_info=True,
+                )
         return connected
 
     def _make_profile_message_handler(self, profile_name: str):

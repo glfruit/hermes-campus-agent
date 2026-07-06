@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from gateway.config import GatewayConfig, Platform
 from gateway.session import SessionSource, SessionStore, build_session_key
+from hermes_state import SessionDB
 
 
 def _src(**kw) -> SessionSource:
@@ -162,4 +163,78 @@ class TestSessionStoreProfileResolution:
         with patch("hermes_cli.profiles.get_active_profile_name", return_value="default"):
             assert store._generate_session_key(s) == "agent:main:telegram:dm:99"
 
+
+class TestMultiplexSessionRecoveryIsolation:
+    """Durable session recovery must not cross profile namespaces."""
+
+    def _db(self, tmp_path):
+        return SessionDB(tmp_path / "state.db")
+
+    def test_named_profile_exact_key_recovers_same_profile(self, tmp_path):
+        db = self._db(tmp_path)
+        key = "agent:edu-tl:telegram:dm:5074167398"
+        db.create_session(
+            "edu-live",
+            "telegram",
+            user_id="5074167398",
+            session_key=key,
+            chat_id="5074167398",
+            chat_type="dm",
+        )
+        db.append_message("edu-live", "user", "hello")
+
+        recovered = db.find_latest_gateway_session_for_peer(
+            source="telegram",
+            user_id="5074167398",
+            session_key=key,
+            chat_id="5074167398",
+            chat_type="dm",
+        )
+
+        assert recovered is not None
+        assert recovered["id"] == "edu-live"
+
+    def test_named_profile_does_not_peer_fallback_to_other_profile(self, tmp_path):
+        db = self._db(tmp_path)
+        db.create_session(
+            "dev-live",
+            "telegram",
+            user_id="5074167398",
+            session_key="agent:dev-ops:telegram:dm:5074167398",
+            chat_id="5074167398",
+            chat_type="dm",
+        )
+        db.append_message("dev-live", "user", "dev ops")
+
+        recovered = db.find_latest_gateway_session_for_peer(
+            source="telegram",
+            user_id="5074167398",
+            session_key="agent:edu-tl:telegram:dm:5074167398",
+            chat_id="5074167398",
+            chat_type="dm",
+        )
+
+        assert recovered is None
+
+    def test_legacy_main_key_can_still_peer_fallback(self, tmp_path):
+        db = self._db(tmp_path)
+        db.create_session(
+            "legacy-live",
+            "telegram",
+            user_id="5074167398",
+            chat_id="5074167398",
+            chat_type="dm",
+        )
+        db.append_message("legacy-live", "user", "legacy")
+
+        recovered = db.find_latest_gateway_session_for_peer(
+            source="telegram",
+            user_id="5074167398",
+            session_key="agent:main:telegram:dm:5074167398",
+            chat_id="5074167398",
+            chat_type="dm",
+        )
+
+        assert recovered is not None
+        assert recovered["id"] == "legacy-live"
 
