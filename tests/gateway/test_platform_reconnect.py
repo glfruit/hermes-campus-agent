@@ -294,50 +294,58 @@ class TestPlatformReconnectWatcher:
         assert runner._failed_platforms[Platform.TELEGRAM]["attempts"] == 2
 
     @pytest.mark.asyncio
-    async def test_reconnect_pauses_after_circuit_breaker_threshold(self):
-        """After enough consecutive retryable failures, the watcher should
-        *pause* the platform (keep it in the queue but stop hammering it),
-        not drop it. The user resumes via /platform resume.
-        """
+    async def test_reconnect_keeps_retrying_after_long_network_outage(self):
+        """A long retryable outage must recover without manual intervention."""
         runner = _make_runner()
+        runner._sync_voice_mode_state_to_adapter = MagicMock()
 
         platform_config = PlatformConfig(enabled=True, token="test")
-        # 9 prior attempts — the next failure will be the 10th and should
-        # trip the circuit breaker.
+        # Nine failed reconnects simulate a long network outage.  The next
+        # attempt still fails, then the configured path becomes healthy.
         runner._failed_platforms[Platform.TELEGRAM] = {
             "config": platform_config,
             "attempts": 9,
             "next_retry": time.monotonic() - 1,
         }
 
-        fail_adapter = StubAdapter(
-            succeed=False, fatal_error="DNS failure", fatal_retryable=True
-        )
+        fail_adapter = StubAdapter(succeed=False)
+        recovered_adapter = StubAdapter(succeed=True)
         real_sleep = asyncio.sleep
+        clock = [time.monotonic()]
+        sleep_calls = 0
 
-        with patch.object(runner, "_create_adapter", return_value=fail_adapter):
-            async def run_one_iteration():
+        async def fake_sleep(_delay):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            # Advance through the capped backoff without waiting in real time.
+            clock[0] += 300
+            if runner.adapters.get(Platform.TELEGRAM) is recovered_adapter or sleep_calls > 25:
+                runner._running = False
+            await real_sleep(0)
+
+        with (
+            patch.object(
+                runner,
+                "_create_adapter",
+                side_effect=[fail_adapter, recovered_adapter],
+            ) as create_adapter,
+            patch.object(
+                runner,
+                "_connect_adapter_with_timeout",
+                new=AsyncMock(side_effect=[False, True]),
+            ),
+            patch("gateway.run.time.monotonic", side_effect=lambda: clock[0]),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
+            async def run_until_recovered_or_stuck():
                 runner._running = True
-                call_count = 0
+                await runner._platform_reconnect_watcher()
 
-                async def fake_sleep(n):
-                    nonlocal call_count
-                    call_count += 1
-                    if call_count > 1:
-                        runner._running = False
-                    await real_sleep(0)
+            await run_until_recovered_or_stuck()
 
-                with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
-
-            await run_one_iteration()
-
-        # Platform stays in queue — paused, not dropped
-        assert Platform.TELEGRAM in runner._failed_platforms
-        info = runner._failed_platforms[Platform.TELEGRAM]
-        assert info["paused"] is True
-        assert info["attempts"] == 10
-        assert "pause_reason" in info
+        assert create_adapter.call_count == 2
+        assert runner.adapters[Platform.TELEGRAM] is recovered_adapter
+        assert Platform.TELEGRAM not in runner._failed_platforms
 
     @pytest.mark.asyncio
     async def test_reconnect_skips_paused_platforms(self):
@@ -713,4 +721,3 @@ class TestPlatformSlashCommand:
         runner = _make_runner()
         out = await runner._handle_platform_command(self._make_event("/platform"))
         assert "Gateway platforms" in out
-
