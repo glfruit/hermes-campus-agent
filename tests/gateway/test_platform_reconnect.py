@@ -26,6 +26,7 @@ class StubAdapter(BasePlatformAdapter):
         self._succeed = succeed
         self._fatal_error = fatal_error
         self._fatal_retryable = fatal_retryable
+        self.disconnect_calls = 0
 
     async def connect(self):
         if self._fatal_error:
@@ -34,6 +35,7 @@ class StubAdapter(BasePlatformAdapter):
         return self._succeed
 
     async def disconnect(self):
+        self.disconnect_calls += 1
         return None
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
@@ -308,7 +310,7 @@ class TestPlatformReconnectWatcher:
             "next_retry": time.monotonic() - 1,
         }
 
-        fail_adapter = StubAdapter(succeed=False)
+        timed_out_adapter = StubAdapter(succeed=False)
         recovered_adapter = StubAdapter(succeed=True)
         real_sleep = asyncio.sleep
         clock = [time.monotonic()]
@@ -327,12 +329,12 @@ class TestPlatformReconnectWatcher:
             patch.object(
                 runner,
                 "_create_adapter",
-                side_effect=[fail_adapter, recovered_adapter],
+                side_effect=[timed_out_adapter, recovered_adapter],
             ) as create_adapter,
             patch.object(
                 runner,
                 "_connect_adapter_with_timeout",
-                new=AsyncMock(side_effect=[False, True]),
+                new=AsyncMock(side_effect=[TimeoutError("network timed out"), True]),
             ),
             patch("gateway.run.time.monotonic", side_effect=lambda: clock[0]),
             patch("asyncio.sleep", side_effect=fake_sleep),
@@ -344,8 +346,42 @@ class TestPlatformReconnectWatcher:
             await run_until_recovered_or_stuck()
 
         assert create_adapter.call_count == 2
+        assert timed_out_adapter.disconnect_calls == 1
         assert runner.adapters[Platform.TELEGRAM] is recovered_adapter
         assert Platform.TELEGRAM not in runner._failed_platforms
+
+    @pytest.mark.asyncio
+    async def test_non_telegram_reconnect_still_pauses_at_threshold(self):
+        """The Telegram hotfix must not change other platform policies."""
+        runner = _make_runner()
+        platform = Platform.WHATSAPP
+        runner._failed_platforms[platform] = {
+            "config": PlatformConfig(enabled=True, token="test"),
+            "attempts": 9,
+            "next_retry": time.monotonic() - 1,
+        }
+        failed_adapter = StubAdapter(platform=platform, succeed=False)
+        real_sleep = asyncio.sleep
+        sleep_calls = 0
+
+        async def fake_sleep(_delay):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls > 1:
+                runner._running = False
+            await real_sleep(0)
+
+        with (
+            patch.object(runner, "_create_adapter", return_value=failed_adapter),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
+            runner._running = True
+            await runner._platform_reconnect_watcher()
+
+        info = runner._failed_platforms[platform]
+        assert info["paused"] is True
+        assert info["attempts"] == 10
+        assert failed_adapter.disconnect_calls == 1
 
     @pytest.mark.asyncio
     async def test_reconnect_skips_paused_platforms(self):

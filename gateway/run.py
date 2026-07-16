@@ -2707,16 +2707,17 @@ class GatewayRunner:
             pass
 
     # ------------------------------------------------------------------
-    # Per-platform pause/resume — explicit operator control for the reconnect
-    # watcher. Retryable failures themselves keep retrying indefinitely.
+    # Per-platform circuit breaker (pause/resume) — used by the reconnect
+    # watcher for non-Telegram platforms, and by the /platform pause|resume
+    # slash command for manual control.
     # ------------------------------------------------------------------
     def _pause_failed_platform(self, platform, *, reason: str = "") -> None:
         """Mark a queued platform as paused — keep it in ``_failed_platforms``
         but stop the reconnect watcher from hammering it.
 
-        Used by ``/platform pause <name>`` for manual intervention. Paused
-        platforms are surfaced in ``/platform list`` and resumed with
-        ``/platform resume <name>``.
+        Used by the reconnect circuit breaker and by ``/platform pause
+        <name>`` for manual intervention. Paused platforms are surfaced in
+        ``/platform list`` and resumed with ``/platform resume <name>``.
         """
         info = getattr(self, "_failed_platforms", {}).get(platform)
         if info is None:
@@ -5689,12 +5690,14 @@ class GatewayRunner:
         """Background task that periodically retries connecting failed platforms.
 
         Uses exponential backoff: 30s → 60s → 120s → 240s → 300s (cap).
-        Retryable failures keep retrying at the backoff cap indefinitely so a
-        long network outage heals without operator intervention. Explicitly
-        paused platforms remain paused until resumed. Non-retryable failures
-        (bad auth, etc.) still drop out of the queue immediately.
+        Telegram retryable failures keep retrying at the backoff cap
+        indefinitely so a long network outage heals without operator
+        intervention. Other platforms retain the existing circuit breaker.
+        Explicitly paused platforms remain paused until resumed. Non-retryable
+        failures (bad auth, etc.) still drop out of the queue immediately.
         """
         _BACKOFF_CAP = 300  # 5 minutes max between retries
+        _PAUSE_AFTER_FAILURES = 10  # non-Telegram circuit-breaker threshold
         await asyncio.sleep(10)  # initial delay — let startup finish
         while self._running:
             if not self._failed_platforms:
@@ -5724,6 +5727,7 @@ class GatewayRunner:
                     platform.value, attempt,
                 )
 
+                adapter = None
                 try:
                     adapter = self._create_adapter(platform, platform_config)
                     if not adapter:
@@ -5760,8 +5764,14 @@ class GatewayRunner:
                             await build_channel_directory(self.adapters)
                         except Exception:
                             pass
+                    else:
+                        # A failed candidate may hold a platform token lock or
+                        # partially initialized HTTP resources. Release them
+                        # before retrying with a fresh adapter.
+                        await self._safe_adapter_disconnect(adapter, platform)
+
                     # Check if the failure is non-retryable
-                    elif adapter.has_fatal_error and not adapter.fatal_error_retryable:
+                    if not success and adapter.has_fatal_error and not adapter.fatal_error_retryable:
                         self._update_platform_runtime_status(
                             platform.value,
                             platform_state="fatal",
@@ -5773,7 +5783,7 @@ class GatewayRunner:
                             platform.value, adapter.fatal_error_message,
                         )
                         del self._failed_platforms[platform]
-                    else:
+                    elif not success:
                         self._update_platform_runtime_status(
                             platform.value,
                             platform_state="retrying",
@@ -5790,7 +5800,20 @@ class GatewayRunner:
                             "Reconnect %s failed, next retry in %ds",
                             platform.value, backoff,
                         )
+                        if (
+                            platform is not Platform.TELEGRAM
+                            and attempt >= _PAUSE_AFTER_FAILURES
+                        ):
+                            self._pause_failed_platform(
+                                platform,
+                                reason=(
+                                    adapter.fatal_error_message
+                                    or "failed to reconnect"
+                                ),
+                            )
                 except Exception as e:
+                    if adapter is not None:
+                        await self._safe_adapter_disconnect(adapter, platform)
                     self._update_platform_runtime_status(
                         platform.value,
                         platform_state="retrying",
@@ -5807,6 +5830,11 @@ class GatewayRunner:
                         "Reconnect %s error: %s, next retry in %ds",
                         platform.value, e, backoff,
                     )
+                    if (
+                        platform is not Platform.TELEGRAM
+                        and attempt >= _PAUSE_AFTER_FAILURES
+                    ):
+                        self._pause_failed_platform(platform, reason=str(e))
 
             # Check every 10 seconds for platforms that need reconnection
             for _ in range(10):
