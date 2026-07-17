@@ -109,7 +109,7 @@ jobs:
             case "$email" in
               ""|*teknium*|*noreply@github.com*|*dependabot*|*github-actions*|*anthropic.com*|*cursor.com*|*+*@users.noreply.github.com*) continue ;;
             esac
-            rg -q --fixed-strings "\"${email}\"" scripts/release.py || {
+            grep -qF "\"${email}\"" scripts/release.py || {
               echo "::error::Unmapped contributor email: ${email}"
               exit 1
             }
@@ -164,7 +164,7 @@ jobs:
             --lockfile=website/package-lock.json
       - name: Reject scanner infrastructure failures
         if: steps.scan.outcome == 'failure'
-        run: test -s osv-results.json
+        run: python3 -m json.tool osv-results.json > /dev/null
 
   all-checks-pass:
     name: All checks pass

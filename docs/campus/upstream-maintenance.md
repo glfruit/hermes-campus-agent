@@ -27,6 +27,8 @@
 
 普通 PR 的 `pull_request_target` 只读取元数据并调度隔离的 `workflow_dispatch`，绝不 checkout 或执行 head；原 `ci.yml` 只在已合并的 `main` push 上运行。隔离 validator 无 Secrets、禁用凭据持久化和 Actions cache。受信 finalizer 为每个当前 head 写入 `trusted-pr-validation` commit status；CI-sensitive 文件还必须有 `ci-reviewed` 标签。自动同步器使用同样的唯一 correlation、head SHA 复核和 commit status。结论不会被后续 push 继承。
 
+每次 PR head 更新都会先撤销 `ci-reviewed`、`supply-chain-reviewed`、`mcp-catalog-reviewed` 和 `upstream-validated`，避免新提交继承旧 SHA 的人工授权。
+
 如果同步修改了 `setup.py` 等安装钩子，供应链扫描会保持失败，直到维护者逐行审查后为 PR 添加 `supply-chain-reviewed` 标签；该标签是显式安全确认，不是自动绕过。
 
 ```bash
