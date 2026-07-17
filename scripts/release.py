@@ -45,6 +45,22 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
+    "5065129@qq.com": "glfruit",  # Campus Telegram reconnect fix, authored on the deployment host.
+    "DavidMetcalfe@users.noreply.github.com": "DavidMetcalfe",
+    "agent@agents-Mac-mini.local": "teknium1",  # Upstream kanban fix committed under a local agent identity.
+    "geoffreybutler94@gmail.com": "geoffreybutler94",
+    "gigakun@agentmail.to": "gigakun3030",
+    "git@hode.co.uk": "okisdev",
+    "glfruit@qq.com": "glfruit",
+    "ilonagaja509-glitch@users.noreply.github.com": "ilonagaja509-glitch",
+    "jakub.wolniewicz@gmail.com": "frizikk",
+    "konsisumer@users.noreply.github.com": "konsisumer",
+    "markvlcek@gmail.com": "MarkVLK",
+    "naqerl@users.noreply.github.com": "naqerl",
+    "nousbot@nousresearch.com": "nousbot-eng",
+    "redpiggy-cyber@users.noreply.github.com": "redpiggy-cyber",
+    "theunathi@gmail.com": "UnathiCodex",
+    "vinoth12940@users.noreply.github.com": "vinoth12940",
     "sam7894604@gmail.com": "sam7894604",  # PR #55803 salvage (discord: /reasoning slash choices)
     "bryan@users.noreply.github.com": "hydraxman",  # PR #62028 salvage (copilot xhigh) — regression-test commit authored under a bare-noreply local git identity; PR author is @hydraxman
     "antydizajn@gmail.com": "antydizajn",  # PR #36043 salvage (auxiliary: route custom:<name> through named-provider arm + Palantir Bearer auth)

@@ -169,7 +169,15 @@ jobs:
 
       - name: Fail on critical findings
         if: steps.scan.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          PR="${{ inputs.pull_request_number || github.event.pull_request.number }}"
+          if gh pr view "$PR" --json labels --jq '.labels[].name' \
+            | grep -Fxq 'supply-chain-reviewed'; then
+            echo "::notice::Critical pattern acknowledged by a maintainer via supply-chain-reviewed."
+            exit 0
+          fi
           echo "::error::CRITICAL supply chain risk patterns detected in this PR. See the PR comment for details."
           exit 1
 

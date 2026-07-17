@@ -25,6 +25,8 @@
 
 同步提案分支不会运行带写权限的主 CI，也不能提供 runner、environment 或 workflow 定义；验证定义固定取自受信任的 fork `main`。只有在只读验证通过并完成代码审查后才合并 PR。合并后，生产机可以运行：
 
+如果同步修改了 `setup.py` 等安装钩子，供应链扫描会保持失败，直到维护者逐行审查后为 PR 添加 `supply-chain-reviewed` 标签；该标签是显式安全确认，不是自动绕过。
+
 ```bash
 hermes update
 ```
