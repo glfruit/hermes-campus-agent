@@ -14,6 +14,7 @@ Covers:
 
 import os
 import unittest
+from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -86,6 +87,95 @@ class TestCheckRequirements(unittest.TestCase):
     def test_requirements_empty_env(self):
         from plugins.platforms.email.adapter import check_email_requirements
         self.assertFalse(check_email_requirements())
+
+
+def test_multiplex_profile_does_not_inherit_global_email_credentials(
+    tmp_path, monkeypatch
+):
+    """A profile secret scope is authoritative over process-global EMAIL_*.
+
+    A multiplex launch wrapper may retain credentials from another profile in
+    ``os.environ``.  Loading an empty profile must not auto-enable Email from
+    those unrelated credentials.
+    """
+    from gateway.config import Platform, load_gateway_config
+    from gateway.run import _profile_runtime_scope
+
+    profile_home = tmp_path / "empty-profile"
+    profile_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.setenv("EMAIL_ADDRESS", "other-profile@example.com")
+    monkeypatch.setenv("EMAIL_PASSWORD", "other-profile-password")
+    monkeypatch.setenv("EMAIL_IMAP_HOST", "imap.other-profile.example")
+    monkeypatch.setenv("EMAIL_SMTP_HOST", "smtp.other-profile.example")
+
+    with _profile_runtime_scope(profile_home):
+        config = load_gateway_config()
+
+    email_config = config.platforms.get(Platform.EMAIL)
+    assert email_config is None or email_config.enabled is False
+
+
+def test_multiplex_email_adapter_uses_its_profile_credentials(tmp_path, monkeypatch):
+    """A profile reads Email settings from config and only its password from env."""
+    from gateway.config import Platform, load_gateway_config
+    from gateway.platform_registry import platform_registry
+    from gateway.run import _profile_runtime_scope
+
+    profile_home = tmp_path / "email-profile"
+    profile_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    (profile_home / ".env").write_text(
+        """EMAIL_PASSWORD=profile-password
+EMAIL_ADDRESS=legacy@example.com
+EMAIL_IMAP_HOST=imap.legacy.example
+EMAIL_SMTP_HOST=smtp.legacy.example
+""",
+        encoding="utf-8",
+    )
+    (profile_home / "config.yaml").write_text(
+        """platforms:
+  email:
+    enabled: true
+    extra:
+      address: profile@example.com
+      imap_host: imap.profile.example
+      imap_port: 1993
+      smtp_host: smtp.profile.example
+      smtp_port: 1587
+      poll_interval: 42
+      allowed_users: trusted@example.com
+      allow_all_users: false
+      require_authenticated_sender: false
+      authserv_id: mx.profile.example
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EMAIL_ADDRESS", "other-profile@example.com")
+    monkeypatch.setenv("EMAIL_PASSWORD", "other-profile-password")
+    monkeypatch.setenv("EMAIL_IMAP_HOST", "imap.other-profile.example")
+    monkeypatch.setenv("EMAIL_SMTP_HOST", "smtp.other-profile.example")
+
+    with _profile_runtime_scope(profile_home):
+        config = load_gateway_config()
+        email_config = config.platforms[Platform.EMAIL]
+        adapter = platform_registry.create_adapter("email", email_config)
+
+        assert email_config.enabled is True
+        assert adapter is not None
+        assert adapter._address == "profile@example.com"
+        assert adapter._password == "profile-password"
+        assert adapter._imap_host == "imap.profile.example"
+        assert adapter._imap_port == 1993
+        assert adapter._smtp_host == "smtp.profile.example"
+        assert adapter._smtp_port == 1587
+        assert adapter._poll_interval == 42
+        assert adapter._allowlist_in_effect() is True
+        assert adapter._allow_all_senders() is False
+        assert adapter._require_authenticated_sender is False
+        assert adapter._authserv_id == "mx.profile.example"
 
 
 class TestHelperFunctions(unittest.TestCase):
@@ -1024,6 +1114,28 @@ class TestConnectDisconnect(unittest.TestCase):
             result = asyncio.run(adapter.connect())
             self.assertFalse(result)
             self.assertFalse(adapter._running)
+
+    def test_second_adapter_cannot_connect_same_mailbox_in_one_process(self):
+        """Multiplex profiles in one process cannot share an Email address."""
+        import asyncio
+
+        first = self._make_adapter()
+        second = self._make_adapter()
+        mock_imap = MagicMock()
+        mock_imap.uid.return_value = ("OK", [b""])
+        mock_smtp = MagicMock()
+
+        async def exercise():
+            self.assertTrue(await first.connect())
+            calls_after_first = mock_imap_factory.call_count
+            self.assertFalse(await second.connect())
+            self.assertEqual(mock_imap_factory.call_count, calls_after_first)
+            await first.disconnect()
+
+        with patch(
+            "imaplib.IMAP4_SSL", return_value=mock_imap
+        ) as mock_imap_factory, patch("smtplib.SMTP", return_value=mock_smtp):
+            asyncio.run(exercise())
 
     def test_connect_smtp_failure(self):
         """SMTP connection failure returns False."""

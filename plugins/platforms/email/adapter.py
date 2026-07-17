@@ -4,7 +4,8 @@ Email platform adapter for the Hermes gateway.
 Allows users to interact with Hermes by sending emails.
 Uses IMAP to receive and SMTP to send messages.
 
-Environment variables:
+Legacy environment-variable compatibility (new setups use config.yaml for
+ordinary settings and .env only for EMAIL_PASSWORD):
     EMAIL_IMAP_HOST     — IMAP server host (e.g., imap.gmail.com)
     EMAIL_IMAP_PORT     — IMAP server port (default: 993)
     EMAIL_SMTP_HOST     — SMTP server host (e.g., smtp.gmail.com)
@@ -19,12 +20,13 @@ import asyncio
 import email as email_lib
 import imaplib
 import logging
-import os
 import re
 import smtplib
 import socket
 import ssl
+import threading
 import uuid
+import weakref
 from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -34,6 +36,7 @@ from email import encoders
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.secret_scope import get_secret
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -43,7 +46,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from gateway.config import Platform, PlatformConfig
-from utils import env_int, env_bool
+from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 # Automated sender patterns — emails from these are silently ignored
@@ -65,6 +68,38 @@ _AUTOMATED_HEADERS = {
 MAX_MESSAGE_LENGTH = 50_000
 
 SMTP_CONNECT_TIMEOUT = 30
+
+_EMAIL_IDENTITY_GUARD = threading.Lock()
+_CLAIMED_EMAIL_IDENTITIES: weakref.WeakValueDictionary[str, Any] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _profile_env(name: str, default: str = "") -> str:
+    """Read Email settings from the active profile's secret scope."""
+    value = get_secret(name, default)
+    return value if value is not None else default
+
+
+def _config_text(extra: dict, key: str, env_name: str, default: str = "") -> str:
+    """Resolve a non-secret setting, preferring config.yaml over legacy env."""
+    raw = extra[key] if key in extra else _profile_env(env_name, default)
+    return str(raw).strip() if raw is not None else default
+
+
+def _config_int(extra: dict, key: str, env_name: str, default: int) -> int:
+    raw = extra[key] if key in extra else _profile_env(env_name)
+    if raw in (None, ""):
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _config_bool(extra: dict, key: str, env_name: str, default: bool = False) -> bool:
+    raw = extra[key] if key in extra else _profile_env(env_name)
+    return is_truthy_value(raw, default=default)
 
 
 def _create_ipv4_connection(
@@ -164,11 +199,29 @@ def check_email_requirements() -> bool:
     Treats blank/whitespace-only values as missing so an abandoned setup that
     left empty ``EMAIL_*`` keys in ``.env`` does not enable the platform (#40715).
     """
-    addr = os.getenv("EMAIL_ADDRESS", "").strip()
-    pwd = os.getenv("EMAIL_PASSWORD", "").strip()
-    imap = os.getenv("EMAIL_IMAP_HOST", "").strip()
-    smtp = os.getenv("EMAIL_SMTP_HOST", "").strip()
+    addr = _profile_env("EMAIL_ADDRESS").strip()
+    pwd = _profile_env("EMAIL_PASSWORD").strip()
+    imap = _profile_env("EMAIL_IMAP_HOST").strip()
+    smtp = _profile_env("EMAIL_SMTP_HOST").strip()
     return all([addr, pwd, imap, smtp])
+
+
+def _email_dependencies_available() -> bool:
+    """Email uses only Python standard-library transport dependencies."""
+    return True
+
+
+def _validate_email_config(config: PlatformConfig) -> bool:
+    """Validate canonical config plus the password from the active secret scope."""
+    extra = config.extra or {}
+    return all(
+        (
+            _config_text(extra, "address", "EMAIL_ADDRESS"),
+            _profile_env("EMAIL_PASSWORD").strip(),
+            _config_text(extra, "imap_host", "EMAIL_IMAP_HOST"),
+            _config_text(extra, "smtp_host", "EMAIL_SMTP_HOST"),
+        )
+    )
 
 
 def _decode_header_value(raw: str) -> str:
@@ -425,22 +478,23 @@ class EmailAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.EMAIL)
 
-        # Resolve connection settings from the env vars first, then fall back to
-        # PlatformConfig.extra (address/imap_host/smtp_host) — the canonical dict
-        # gateway.config populates and that the "connected" check, the
-        # send-helper, and `hermes config show` already read. Without the
-        # fallback a config.yaml-only setup left these empty. Host/address values
-        # are stripped: a stray space or newline made IMAP4_SSL raise the
-        # misleading ``[Errno 8] nodename nor servname`` (an unresolvable name)
+        # Resolve non-secret connection settings from PlatformConfig.extra,
+        # falling back to scoped env vars for backward compatibility.
+        # Host/address values are stripped: a stray space or newline made
+        # IMAP4_SSL raise the misleading ``[Errno 8] nodename nor servname``
         # instead of an obvious "host not set" error.
         extra = config.extra or {}
-        self._address = (os.getenv("EMAIL_ADDRESS", "") or extra.get("address", "")).strip()
-        self._password = os.getenv("EMAIL_PASSWORD", "")
-        self._imap_host = (os.getenv("EMAIL_IMAP_HOST", "") or extra.get("imap_host", "")).strip()
-        self._imap_port = env_int("EMAIL_IMAP_PORT", 993)
-        self._smtp_host = (os.getenv("EMAIL_SMTP_HOST", "") or extra.get("smtp_host", "")).strip()
-        self._smtp_port = env_int("EMAIL_SMTP_PORT", 587)
-        self._poll_interval = env_int("EMAIL_POLL_INTERVAL", 15)
+        self._address = _config_text(extra, "address", "EMAIL_ADDRESS")
+        self._password = _profile_env("EMAIL_PASSWORD")
+        self._imap_host = _config_text(extra, "imap_host", "EMAIL_IMAP_HOST")
+        self._imap_port = _config_int(extra, "imap_port", "EMAIL_IMAP_PORT", 993)
+        self._smtp_host = _config_text(extra, "smtp_host", "EMAIL_SMTP_HOST")
+        self._smtp_port = _config_int(extra, "smtp_port", "EMAIL_SMTP_PORT", 587)
+        self._poll_interval = _config_int(extra, "poll_interval", "EMAIL_POLL_INTERVAL", 15)
+        self._allowed_users = _config_text(extra, "allowed_users", "EMAIL_ALLOWED_USERS")
+        self._allow_all_users = _config_bool(
+            extra, "allow_all_users", "EMAIL_ALLOW_ALL_USERS"
+        )
 
         # Skip attachments — configured via config.yaml:
         #   platforms:
@@ -464,7 +518,7 @@ class EmailAdapter(BasePlatformAdapter):
         # gate below is skipped.
         if "require_authenticated_sender" in extra:
             self._require_authenticated_sender = bool(extra["require_authenticated_sender"])
-        elif env_bool("EMAIL_TRUST_FROM_HEADER", False):
+        elif _config_bool(extra, "trust_from_header", "EMAIL_TRUST_FROM_HEADER"):
             self._require_authenticated_sender = False
         else:
             self._require_authenticated_sender = True
@@ -473,18 +527,46 @@ class EmailAdapter(BasePlatformAdapter):
         # own receiving server (defends against an injected header that sorts
         # first). Defaults to the From-domain of the agent's own address.
         self._authserv_id = (
-            extra.get("authserv_id", "") or os.getenv("EMAIL_AUTHSERV_ID", "")
-        ).strip().lower()
+            _config_text(extra, "authserv_id", "EMAIL_AUTHSERV_ID")
+        ).lower()
 
         # Track message IDs we've already processed to avoid duplicates
         self._seen_uids: set = set()
         self._seen_uids_max: int = 2000   # cap to prevent unbounded memory growth
         self._poll_task: Optional[asyncio.Task] = None
+        self._email_identity_claimed = False
 
         # Map chat_id (sender email) -> last subject + message-id for threading
         self._thread_context: Dict[str, Dict[str, str]] = {}
 
         logger.info("[Email] Adapter initialized for %s", self._address)
+
+    def _claim_email_identity(self) -> bool:
+        """Claim this mailbox within a multiplex gateway process."""
+        if self._email_identity_claimed:
+            return True
+        identity = self._address.lower()
+        with _EMAIL_IDENTITY_GUARD:
+            owner = _CLAIMED_EMAIL_IDENTITIES.get(identity)
+            if owner is not None and owner is not self:
+                message = "Email address already in use. Stop the other profile first."
+                logger.error("[Email] %s", message)
+                self._set_fatal_error("email_address_lock", message, retryable=True)
+                return False
+            _CLAIMED_EMAIL_IDENTITIES[identity] = self
+            self._email_identity_claimed = True
+        return True
+
+    def _release_email_locks(self) -> None:
+        """Release both machine-local and multiplex-process mailbox claims."""
+        self._release_platform_lock()
+        if not self._email_identity_claimed:
+            return
+        with _EMAIL_IDENTITY_GUARD:
+            identity = self._address.lower()
+            if _CLAIMED_EMAIL_IDENTITIES.get(identity) is self:
+                _CLAIMED_EMAIL_IDENTITIES.pop(identity, None)
+            self._email_identity_claimed = False
 
     def _trim_seen_uids(self) -> None:
         """Keep only the most recent UIDs to prevent unbounded memory growth.
@@ -580,6 +662,14 @@ class EmailAdapter(BasePlatformAdapter):
             )
             return False
 
+        if not self._claim_email_identity():
+            return False
+        if not self._acquire_platform_lock(
+            "email-address", self._address.lower(), "Email address"
+        ):
+            self._release_email_locks()
+            return False
+
         try:
             # Test IMAP connection
             imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
@@ -596,6 +686,7 @@ class EmailAdapter(BasePlatformAdapter):
             imap.logout()
             logger.info("[Email] IMAP connection test passed. %d existing messages skipped.", len(self._seen_uids))
         except Exception as e:
+            self._release_email_locks()
             logger.error("[Email] IMAP connection failed: %s", e)
             return False
 
@@ -608,6 +699,7 @@ class EmailAdapter(BasePlatformAdapter):
                 smtp.quit()
             logger.info("[Email] SMTP connection test passed.")
         except Exception as e:
+            self._release_email_locks()
             logger.error("[Email] SMTP connection failed: %s", e)
             return False
 
@@ -626,6 +718,7 @@ class EmailAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
             self._poll_task = None
+        self._release_email_locks()
         logger.info("[Email] Disconnected.")
 
     async def _poll_loop(self) -> None:
@@ -745,8 +838,7 @@ class EmailAdapter(BasePlatformAdapter):
             logger.error("[Email] IMAP fetch error: %s", e)
         return results
 
-    @staticmethod
-    def _allow_all_senders() -> bool:
+    def _allow_all_senders(self) -> bool:
         """Return True when the operator opted into accepting any sender.
 
         Mirrors the gateway authz allow-all resolution: the per-platform
@@ -756,12 +848,11 @@ class EmailAdapter(BasePlatformAdapter):
         """
         truthy = {"true", "1", "yes"}
         return (
-            os.getenv("EMAIL_ALLOW_ALL_USERS", "").strip().lower() in truthy
-            or os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() in truthy
+            self._allow_all_users
+            or _profile_env("GATEWAY_ALLOW_ALL_USERS").strip().lower() in truthy
         )
 
-    @staticmethod
-    def _allowlist_in_effect() -> bool:
+    def _allowlist_in_effect(self) -> bool:
         """Return True when a sender allowlist gates email access.
 
         Authorization keys on the From: address only when an allowlist is
@@ -771,8 +862,8 @@ class EmailAdapter(BasePlatformAdapter):
         and the authentication gate is unnecessary.
         """
         return bool(
-            os.getenv("EMAIL_ALLOWED_USERS", "").strip()
-            or os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
+            self._allowed_users
+            or _profile_env("GATEWAY_ALLOWED_USERS").strip()
         )
 
     async def _dispatch_message(self, msg_data: Dict[str, Any]) -> None:
@@ -793,10 +884,10 @@ class EmailAdapter(BasePlatformAdapter):
         # that the gateway will never authorize.  Without this early guard,
         # a race between dispatch and authorization can result in the adapter
         # sending a reply even though the handler returned None.
-        allowed_raw = os.getenv("EMAIL_ALLOWED_USERS", "").strip()
+        allowed_raw = self._allowed_users
         if not allowed_raw:
-            if os.getenv("EMAIL_ALLOW_ALL_USERS", "").strip().lower() not in {"true", "1", "yes"} and (
-                os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() not in {"true", "1", "yes"}
+            if not self._allow_all_users and (
+                _profile_env("GATEWAY_ALLOW_ALL_USERS").strip().lower() not in {"true", "1", "yes"}
             ):
                 logger.debug(
                     "[Email] Dropping sender at dispatch — EMAIL_ALLOWED_USERS is unset "
@@ -1204,13 +1295,10 @@ async def _standalone_send(
     from email.utils import formatdate
 
     extra = getattr(pconfig, "extra", {}) or {}
-    address = extra.get("address") or os.getenv("EMAIL_ADDRESS", "")
-    password = os.getenv("EMAIL_PASSWORD", "")
-    smtp_host = extra.get("smtp_host") or os.getenv("EMAIL_SMTP_HOST", "")
-    try:
-        smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587"))
-    except (ValueError, TypeError):
-        smtp_port = 587
+    address = _config_text(extra, "address", "EMAIL_ADDRESS")
+    password = _profile_env("EMAIL_PASSWORD")
+    smtp_host = _config_text(extra, "smtp_host", "EMAIL_SMTP_HOST")
+    smtp_port = _config_int(extra, "smtp_port", "EMAIL_SMTP_PORT", 587)
 
     if not all([address, password, smtp_host]):
         return {"error": "Email not configured (EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_SMTP_HOST required)"}
@@ -1243,13 +1331,42 @@ def _is_connected(config) -> bool:
     extra = getattr(config, "extra", {}) or {}
     if extra.get("address"):
         return True
-    import hermes_cli.gateway as gateway_mod
-    return bool((gateway_mod.get_env_value("EMAIL_ADDRESS") or "").strip())
+    return bool(_profile_env("EMAIL_ADDRESS").strip())
 
 
 def _build_adapter(config):
     """Factory wrapper that constructs EmailAdapter from a PlatformConfig."""
     return EmailAdapter(config)
+
+
+def _setup_email() -> None:
+    """Configure ordinary mailbox settings in YAML and save only the password as a secret."""
+    from hermes_cli.config import read_raw_config, save_config, save_env_value
+    from hermes_cli.setup import print_success, print_warning, prompt
+
+    address = prompt("  Email address")
+    password = prompt("  Email password or app password", password=True)
+    imap_host = prompt("  IMAP host")
+    smtp_host = prompt("  SMTP host")
+    if not all((address, password, imap_host, smtp_host)):
+        print_warning("  Email setup skipped — all four values are required.")
+        return
+
+    config = read_raw_config()
+    platforms = config.setdefault("platforms", {})
+    email_config = platforms.setdefault("email", {})
+    extra = email_config.setdefault("extra", {})
+    extra.update(
+        {
+            "address": address.strip(),
+            "imap_host": imap_host.strip(),
+            "smtp_host": smtp_host.strip(),
+        }
+    )
+    email_config["enabled"] = True
+    save_config(config, strip_defaults=False)
+    save_env_value("EMAIL_PASSWORD", password)
+    print_success("  Email settings saved to config.yaml; password saved to .env.")
 
 
 def register(ctx) -> None:
@@ -1258,10 +1375,12 @@ def register(ctx) -> None:
         name="email",
         label="Email",
         adapter_factory=_build_adapter,
-        check_fn=check_email_requirements,
+        check_fn=_email_dependencies_available,
+        validate_config=_validate_email_config,
         is_connected=_is_connected,
-        required_env=["EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_SMTP_HOST"],
+        required_env=["EMAIL_PASSWORD"],
         install_hint="Email uses the Python stdlib (smtplib/imaplib) — no extra deps",
+        setup_fn=_setup_email,
         allowed_users_env="EMAIL_ALLOWED_USERS",
         allow_all_env="EMAIL_ALLOW_ALL_USERS",
         cron_deliver_env_var="EMAIL_HOME_ADDRESS",

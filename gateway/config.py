@@ -1799,12 +1799,12 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     if all([email_addr, email_pwd, email_imap, email_smtp]):
         if Platform.EMAIL not in config.platforms:
             config.platforms[Platform.EMAIL] = PlatformConfig()
-        config.platforms[Platform.EMAIL].enabled = True
-        config.platforms[Platform.EMAIL].extra.update({
-            "address": email_addr,
-            "imap_host": email_imap,
-            "smtp_host": email_smtp,
-        })
+        email_config = config.platforms[Platform.EMAIL]
+        if not email_config.extra.get("_enabled_explicit"):
+            email_config.enabled = True
+        email_config.extra.setdefault("address", email_addr)
+        email_config.extra.setdefault("imap_host", email_imap)
+        email_config.extra.setdefault("smtp_host", email_smtp)
     email_home = getenv("EMAIL_HOME_ADDRESS")
     if email_home and Platform.EMAIL in config.platforms:
         config.platforms[Platform.EMAIL].home_channel = HomeChannel(
