@@ -12,7 +12,24 @@ permissions:
   pull-requests: read
 
 jobs:
+  invalidate-stale-reviews:
+    if: github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Remove review labels bound to the previous head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          for label in ci-reviewed supply-chain-reviewed mcp-catalog-reviewed upstream-validated; do
+            gh pr edit "$PR_NUMBER" --remove-label "$label" || true
+          done
+
   classify:
+    if: always()
+    needs: invalidate-stale-reviews
     runs-on: ubuntu-latest
     outputs:
       mcp_catalog_changed: ${{ steps.paths.outputs.mcp_catalog_changed }}
@@ -30,7 +47,7 @@ jobs:
           else
             echo "mcp_catalog_changed=false" >> "$GITHUB_OUTPUT"
           fi
-          if printf '%s\n' "$files" | grep -Eq '^(\.github/workflows/|\.github/actions/|\.prettierrc$)'; then
+          if printf '%s\n' "$files" | grep -Eq '^(\.github/workflows/|\.github/actions/|\.prettierrc$)|(^|/)eslint\.config\.[^/]+$'; then
             echo "ci_review_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "ci_review_changed=false" >> "$GITHUB_OUTPUT"

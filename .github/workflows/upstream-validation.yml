@@ -164,7 +164,7 @@ jobs:
             --lockfile=website/package-lock.json
       - name: Reject scanner infrastructure failures
         if: steps.scan.outcome == 'failure'
-        run: test -s osv-results.json
+        run: python3 -m json.tool osv-results.json > /dev/null
 
   all-checks-pass:
     name: All checks pass

@@ -68,10 +68,16 @@ jobs:
           else
             mcp_catalog_changed=true
           fi
+          if git diff --quiet "$base_sha"...HEAD -- .github/workflows/ .github/actions/ .prettierrc ':(glob)**/eslint.config.*'; then
+            ci_review_changed=false
+          else
+            ci_review_changed=true
+          fi
 
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
           echo "mcp_catalog_changed=$mcp_catalog_changed" >> "$GITHUB_OUTPUT"
+          echo "ci_review_changed=$ci_review_changed" >> "$GITHUB_OUTPUT"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Open review PR
@@ -96,6 +102,7 @@ jobs:
           BASE_SHA: ${{ steps.merge.outputs.base_sha }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           MCP_CATALOG_CHANGED: ${{ steps.merge.outputs.mcp_catalog_changed }}
+          CI_REVIEW_CHANGED: ${{ steps.merge.outputs.ci_review_changed }}
         run: |
           correlation="sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           gh workflow run upstream-validation.yml \
@@ -122,6 +129,17 @@ jobs:
             echo "PR head changed during validation; refusing stale success."
             exit 1
           }
+          if [ "$CI_REVIEW_CHANGED" = true ] && ! gh pr view "$PR_NUMBER" \
+            --json labels --jq '.labels[].name' | grep -Fxq ci-reviewed; then
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/statuses/${proposal_sha}" \
+              -f state=failure \
+              -f context=trusted-pr-validation \
+              -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+              -f description="CI-sensitive changes require ci-reviewed"
+            echo "CI-sensitive changes are not reviewed; label the PR to trigger trusted validation."
+            exit 1
+          fi
           gh api --method POST \
             "repos/${GITHUB_REPOSITORY}/statuses/${proposal_sha}" \
             -f state=success \
