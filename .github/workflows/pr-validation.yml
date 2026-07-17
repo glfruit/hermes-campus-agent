@@ -54,6 +54,7 @@ jobs:
           fi
 
   review-gate:
+    if: always() && needs.classify.result == 'success'
     needs: classify
     runs-on: ubuntu-latest
     permissions:
@@ -67,6 +68,9 @@ jobs:
         run: |
           gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' \
             | grep -Fxq ci-reviewed
+      - name: Confirm no CI-sensitive review is required
+        if: needs.classify.outputs.ci_review_changed != 'true'
+        run: echo "No CI-sensitive files changed"
 
   dispatch-and-finalize:
     name: Dispatch isolated validation
