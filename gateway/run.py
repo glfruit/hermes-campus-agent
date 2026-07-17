@@ -1504,6 +1504,25 @@ def load_gateway_config_for_runner() -> "GatewayConfig":
         return cfg
 
 
+def _create_primary_adapter(
+    runner: "GatewayRunner", platform: "Platform", platform_config: "PlatformConfig"
+) -> Optional["BasePlatformAdapter"]:
+    """Create a primary adapter inside its profile scope when multiplexing.
+
+    Secondary adapters already enter ``_profile_runtime_scope`` before their
+    factory runs.  The primary startup loop must do the same: plugin validators
+    and constructors may resolve profile secrets, and unscoped reads correctly
+    fail closed in multiplex mode.
+    """
+    from agent.secret_scope import is_multiplex_active
+
+    if not is_multiplex_active():
+        return runner._create_adapter(platform, platform_config)
+
+    with _profile_runtime_scope(Path(get_hermes_home())):
+        return runner._create_adapter(platform, platform_config)
+
+
 def _platform_has_bot_credential(platform: "Platform", platform_config: "PlatformConfig") -> bool:
     """Return True when a token-authenticated platform has a usable bot credential.
 
@@ -7297,7 +7316,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 continue
             enabled_platform_count += 1
             
-            adapter = self._create_adapter(platform, platform_config)
+            adapter = _create_primary_adapter(self, platform, platform_config)
             if not adapter:
                 # Distinguish between missing builtin deps and missing plugin
                 _pval = platform.value

@@ -178,6 +178,46 @@ EMAIL_SMTP_HOST=smtp.legacy.example
         assert adapter._authserv_id == "mx.profile.example"
 
 
+def test_multiplex_primary_adapter_creation_uses_active_profile_scope(
+    tmp_path, monkeypatch
+):
+    """Primary adapters must resolve secrets inside the active profile scope."""
+    from agent.secret_scope import set_multiplex_active
+    from gateway.config import Platform, PlatformConfig
+    from gateway.run import _create_primary_adapter
+
+    profile_home = tmp_path / ".hermes"
+    profile_home.mkdir()
+    (profile_home / ".env").write_text(
+        "EMAIL_PASSWORD=primary-password\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    set_multiplex_active(True)
+
+    class _Runner:
+        def _create_adapter(self, platform, config):
+            from gateway.platform_registry import platform_registry
+
+            return platform_registry.create_adapter(platform.value, config)
+
+    config = PlatformConfig(
+        enabled=True,
+        extra={
+            "address": "primary@example.com",
+            "imap_host": "imap.primary.example",
+            "smtp_host": "smtp.primary.example",
+        },
+    )
+    try:
+        adapter = _create_primary_adapter(_Runner(), Platform.EMAIL, config)
+    finally:
+        set_multiplex_active(False)
+
+    assert adapter is not None
+    assert adapter._password == "primary-password"
+
+
 class TestHelperFunctions(unittest.TestCase):
     """Test email parsing helper functions."""
 
