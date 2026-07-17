@@ -2,23 +2,6 @@ name: Validate upstream proposal
 run-name: Validate upstream ${{ inputs.correlation }}
 
 on:
-  workflow_call:
-    inputs:
-      proposal_sha:
-        required: true
-        type: string
-      base_sha:
-        required: true
-        type: string
-      pr_number:
-        required: true
-        type: string
-      mcp_catalog_changed:
-        required: true
-        type: boolean
-      correlation:
-        required: true
-        type: string
   workflow_dispatch:
     inputs:
       proposal_sha:
@@ -59,6 +42,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          enable-cache: false
       - run: uv python install 3.11
       - run: uv sync --locked --python 3.11 --extra all --extra dev
       - run: scripts/run_tests.sh
@@ -76,7 +61,6 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
       - name: Check every npm workspace
         run: |
@@ -104,6 +88,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          enable-cache: false
       - name: Verify trusted ancestry and exact proposal
         env:
           BASE_SHA: ${{ inputs.base_sha }}
@@ -166,13 +152,19 @@ jobs:
           ref: ${{ inputs.proposal_sha }}
           persist-credentials: false
       - name: Scan proposal lockfiles
+        id: scan
         continue-on-error: true
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           scan-args: |-
+            --format=json
+            --output=osv-results.json
             --lockfile=uv.lock
             --lockfile=package-lock.json
             --lockfile=website/package-lock.json
+      - name: Reject scanner infrastructure failures
+        if: steps.scan.outcome == 'failure'
+        run: test -s osv-results.json
 
   all-checks-pass:
     name: All checks pass

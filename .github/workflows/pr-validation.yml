@@ -1,7 +1,8 @@
 name: Validate pull request
 
-# pull_request_target keeps the workflow definition on trusted main. The
-# called validator checks out the proposed SHA without persisting credentials.
+# This trusted-base workflow never checks out or executes proposal code. It
+# dispatches the credential-free validator, waits for the correlated run, then
+# publishes a status bound to the exact PR head SHA.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled]
@@ -15,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       mcp_catalog_changed: ${{ steps.paths.outputs.mcp_catalog_changed }}
+      ci_review_changed: ${{ steps.paths.outputs.ci_review_changed }}
     steps:
       - id: paths
         env:
@@ -22,20 +24,93 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
-            --jq '.[].filename' \
-            | grep -Eq '^(optional-mcps/|hermes_cli/mcp_catalog\.py$)'; then
+          files=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename')
+          if printf '%s\n' "$files" | grep -Eq '^(optional-mcps/|hermes_cli/mcp_catalog\.py$)'; then
             echo "mcp_catalog_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "mcp_catalog_changed=false" >> "$GITHUB_OUTPUT"
           fi
+          if printf '%s\n' "$files" | grep -Eq '^(\.github/workflows/|\.github/actions/|\.prettierrc$)'; then
+            echo "ci_review_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ci_review_changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
-  validation:
+  review-gate:
     needs: classify
-    uses: ./.github/workflows/upstream-validation.yml
-    with:
-      proposal_sha: ${{ github.event.pull_request.head.sha }}
-      base_sha: ${{ github.event.pull_request.base.sha }}
-      pr_number: ${{ github.event.pull_request.number }}
-      mcp_catalog_changed: ${{ needs.classify.outputs.mcp_catalog_changed == 'true' }}
-      correlation: pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Require review for CI-sensitive changes
+        if: needs.classify.outputs.ci_review_changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' \
+            | grep -Fxq ci-reviewed
+
+  dispatch-and-finalize:
+    name: Dispatch isolated validation
+    if: always()
+    needs: [classify, review-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      statuses: write
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Validate and publish head-bound result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MCP_CATALOG_CHANGED: ${{ needs.classify.outputs.mcp_catalog_changed }}
+          REVIEW_RESULT: ${{ needs.review-gate.result }}
+        run: |
+          set -euo pipefail
+          state=failure
+          run_id=""
+          if [ "$REVIEW_RESULT" = success ]; then
+            correlation="pr-${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            gh workflow run upstream-validation.yml \
+              -f proposal_sha="$HEAD_SHA" \
+              -f base_sha="$BASE_SHA" \
+              -f pr_number="$PR_NUMBER" \
+              -f mcp_catalog_changed="$MCP_CATALOG_CHANGED" \
+              -f correlation="$correlation"
+            title="Validate upstream $correlation"
+            for _ in $(seq 1 30); do
+              run_id=$(gh run list --workflow upstream-validation.yml --event workflow_dispatch \
+                --json databaseId,displayTitle \
+                --jq ".[] | select(.displayTitle == \"$title\") | .databaseId" \
+                | head -1)
+              [ -n "$run_id" ] && break
+              sleep 2
+            done
+            if [ -z "$run_id" ]; then
+              echo "Validation run was not created"
+            elif gh run watch "$run_id" --exit-status; then
+              current_head=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+              [ "$current_head" = "$HEAD_SHA" ] && state=success
+            fi
+          fi
+          target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id:-$GITHUB_RUN_ID}"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state="$state" \
+            -f context=trusted-pr-validation \
+            -f target_url="$target_url" \
+            -f description="Trusted isolated PR validation ${state}"
+          if [[ "$HEAD_REF" == automation/upstream-sync-* ]]; then
+            if [ "$state" = success ]; then
+              gh pr edit "$PR_NUMBER" --add-label upstream-validated
+            else
+              gh pr edit "$PR_NUMBER" --remove-label upstream-validated || true
+            fi
+          fi
+          [ "$state" = success ]

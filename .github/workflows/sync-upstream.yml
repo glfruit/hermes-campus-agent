@@ -125,7 +125,7 @@ jobs:
           gh api --method POST \
             "repos/${GITHUB_REPOSITORY}/statuses/${proposal_sha}" \
             -f state=success \
-            -f context=upstream-validation \
+            -f context=trusted-pr-validation \
             -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
             -f description="Trusted read-only upstream validation passed"
           gh pr edit "$PR_NUMBER" --add-label upstream-validated
