@@ -1,8 +1,10 @@
 """Phase 3: secondary-profile adapter registry + same-token conflict detection."""
 import logging
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.run import GatewayRunner
 
 
@@ -10,6 +12,19 @@ class _FakeAdapter:
     def __init__(self, token=None, config=None):
         self.token = token
         self.config = config
+
+
+class _FatalProfileAdapter:
+    platform = Platform.TELEGRAM
+    fatal_error_code = "telegram_network_error"
+    fatal_error_message = "network unavailable"
+    fatal_error_retryable = True
+
+    def __init__(self):
+        self.disconnect_calls = 0
+
+    async def disconnect(self):
+        self.disconnect_calls += 1
 
 
 class TestCredentialFingerprint:
@@ -142,6 +157,72 @@ class TestProfileMessageHandler:
 
         await handler(_Evt())
         assert seen["profile"] == "writer"
+
+
+class TestProfileReconnectOwnership:
+    @pytest.mark.asyncio
+    async def test_secondary_fatal_retries_its_profile_not_root(self, tmp_path):
+        """A secondary fatal must retain its profile config ownership."""
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner.config = GatewayConfig(
+            platforms={
+                Platform.TELEGRAM: PlatformConfig(enabled=True, token=None),
+            },
+            multiplex_profiles=True,
+        )
+        adapter = _FatalProfileAdapter()
+        # A primary profile may own the same platform with another credential;
+        # that must not make this secondary failure look stale.
+        runner.adapters = {
+            Platform.API_SERVER: object(),
+            Platform.TELEGRAM: object(),
+        }
+        runner._profile_adapters = {
+            "edu-tl": {Platform.TELEGRAM: adapter},
+        }
+        runner._profile_homes = {"edu-tl": tmp_path}
+        runner._failed_platforms = {}
+        runner.delivery_router = MagicMock()
+        runner._update_platform_runtime_status = MagicMock()
+        runner._schedule_profile_reconnect = MagicMock()
+        runner.stop = AsyncMock()
+
+        await runner._handle_adapter_fatal_error(adapter)
+
+        assert Platform.TELEGRAM not in runner._profile_adapters["edu-tl"]
+        assert adapter.disconnect_calls == 1
+        assert runner._failed_platforms == {}
+        runner._schedule_profile_reconnect.assert_called_once_with(
+            "edu-tl", tmp_path, Platform.TELEGRAM
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconnect_loop_rebuilds_only_failed_profile(self, tmp_path):
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._running = True
+        runner.adapters = {}
+        runner._profile_adapters = {"edu-tl": {}}
+        runner._profile_reconnect_tasks = {}
+        runner._background_tasks = set()
+
+        async def reconnect(profile_name, profile_home, _claimed, **kwargs):
+            assert profile_name == "edu-tl"
+            assert profile_home == tmp_path
+            assert kwargs == {
+                "only_platform": Platform.TELEGRAM,
+                "is_reconnect": True,
+            }
+            runner._profile_adapters[profile_name][Platform.TELEGRAM] = object()
+            return 1
+
+        runner._start_one_profile_adapters = AsyncMock(side_effect=reconnect)
+        runner._profile_reconnect_claims = MagicMock(return_value={})
+
+        await runner._profile_reconnect_loop(
+            "edu-tl", tmp_path, Platform.TELEGRAM
+        )
+
+        runner._start_one_profile_adapters.assert_awaited_once()
 
 
 class TestSecondaryProfileConfigHandling:
@@ -326,10 +407,17 @@ class TestSecondaryProfileConfigHandling:
         )
         # _create_adapter returns None here (no real telegram token wiring), so
         # the loop simply connects nothing — the key assertion is NO raise.
-        monkeypatch.setattr(runner, "_create_adapter", lambda p, c: None)
+        seen_tokens = []
+
+        def create_adapter(_platform, config):
+            seen_tokens.append(config.token)
+            return None
+
+        monkeypatch.setattr(runner, "_create_adapter", create_adapter)
 
         connected = await runner._start_one_profile_adapters("reviewer", "/tmp/x", {})
         assert connected == 0  # nothing connected, but no MultiplexConfigError
+        assert seen_tokens == ["t"]
 
     @pytest.mark.asyncio
     async def test_multiplex_secondary_skips_relay_but_starts_direct_adapter(
@@ -535,9 +623,6 @@ class TestSecondaryProfileConfigHandling:
             "line",
         ):
             assert p in _PORT_BINDING_PLATFORM_VALUES
-
-
-
 class TestFeishuPortBindingConditional:
     """Feishu websocket mode does NOT bind a port; only webhook mode does (#52563)."""
 

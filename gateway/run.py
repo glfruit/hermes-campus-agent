@@ -2926,6 +2926,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # sites are untouched when multiplexing is off (this dict is empty).
         # Populated by _start_secondary_profile_adapters().
         self._profile_adapters: Dict[str, Dict[Platform, BasePlatformAdapter]] = {}
+        self._profile_homes: Dict[str, Path] = {}
+        self._profile_adapter_owners: Any = _weakref.WeakKeyDictionary()
+        self._profile_reconnect_tasks: Dict[tuple[str, Platform], asyncio.Task] = {}
+        # _profile_runtime_scope temporarily changes the process-wide
+        # HERMES_HOME. Never let two profile reconnects overlap that scope.
+        self._profile_reconnect_lock = asyncio.Lock()
         self._warn_if_docker_media_delivery_is_risky()
         _gateway_runner_ref = _weakref.ref(self)
 
@@ -4110,8 +4116,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # would overwrite an already-healthy platform's runtime status and
         # incorrectly re-queue it for reconnection, so bail out before any of
         # that happens.
+        profile_name = None
+        profile_home = None
+        owner = getattr(self, "_profile_adapter_owners", {}).get(adapter)
+        if owner is not None:
+            profile_name, profile_home = owner
+        if profile_name is None:
+            for candidate_name, candidate_map in getattr(
+                self, "_profile_adapters", {}
+            ).items():
+                if candidate_map.get(adapter.platform) is adapter:
+                    profile_name = candidate_name
+                    profile_home = getattr(self, "_profile_homes", {}).get(
+                        candidate_name
+                    )
+                    break
+
         existing = self.adapters.get(adapter.platform)
-        if existing is not None and existing is not adapter:
+        if profile_name is not None:
+            profile_existing = getattr(self, "_profile_adapters", {}).get(
+                profile_name, {}
+            ).get(adapter.platform)
+            if profile_existing is not adapter:
+                logger.debug(
+                    "Ignoring stale fatal error from superseded %s adapter "
+                    "for profile %s",
+                    adapter.platform.value,
+                    profile_name,
+                )
+                return
+        if profile_name is None and existing is not None and existing is not adapter:
             logger.debug(
                 "Ignoring stale fatal error from a superseded %s adapter instance: %s",
                 adapter.platform.value,
@@ -4135,12 +4169,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             platform_state = "retrying"
         else:
             platform_state = "fatal"
-        self._update_platform_runtime_status(
-            adapter.platform.value,
-            platform_state=platform_state,
-            error_code=adapter.fatal_error_code,
-            error_message=adapter.fatal_error_message,
-        )
+        if profile_name is not None and profile_home is not None:
+            with _profile_runtime_scope(profile_home):
+                self._update_platform_runtime_status(
+                    adapter.platform.value,
+                    platform_state=platform_state,
+                    error_code=adapter.fatal_error_code,
+                    error_message=adapter.fatal_error_message,
+                )
+        else:
+            self._update_platform_runtime_status(
+                adapter.platform.value,
+                platform_state=platform_state,
+                error_code=adapter.fatal_error_code,
+                error_message=adapter.fatal_error_message,
+            )
+
+        if profile_name is not None:
+            profile_map = self._profile_adapters.get(profile_name, {})
+            profile_map.pop(adapter.platform, None)
+            await adapter.disconnect()
+            if adapter.fatal_error_retryable and profile_home is not None:
+                self._schedule_profile_reconnect(
+                    profile_name, profile_home, adapter.platform
+                )
+            return
 
         if existing is adapter:
             # Claim this adapter for teardown before awaiting disconnect() —
@@ -8742,6 +8795,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         for profile_name, profile_home in profiles_to_serve(multiplex=True):
             if profile_name == active:
                 continue  # handled by the primary startup loop
+            profile_homes = getattr(self, "_profile_homes", None)
+            if profile_homes is None:
+                profile_homes = {}
+                self._profile_homes = profile_homes
+            profile_homes[profile_name] = profile_home
             try:
                 connected += await self._start_one_profile_adapters(
                     profile_name, profile_home, claimed
@@ -8779,7 +8837,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return connected
 
     async def _start_one_profile_adapters(
-        self, profile_name: str, profile_home: "Path", claimed: Dict[tuple, str]
+        self,
+        profile_name: str,
+        profile_home: "Path",
+        claimed: Dict[tuple, str],
+        *,
+        only_platform: Optional[Platform] = None,
+        is_reconnect: bool = False,
     ) -> int:
         """Create+connect one profile's adapters under its runtime scope."""
         from gateway.config import load_gateway_config
@@ -8815,6 +8879,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         profile_map = self._profile_adapters.setdefault(profile_name, {})
         connected = 0
         for platform, platform_config in profile_cfg.platforms.items():
+            if only_platform is not None and platform != only_platform:
+                continue
             if not platform_config.enabled:
                 continue
             # Relay is shared process-level ingress in multiplex mode. The
@@ -8874,10 +8940,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 self._make_adapter_auth_check(adapter.platform, profile_name=profile_name)
             )
             adapter._busy_text_mode = self._busy_text_mode
+            owners = getattr(self, "_profile_adapter_owners", None)
+            if owners is None:
+                owners = _weakref.WeakKeyDictionary()
+                self._profile_adapter_owners = owners
+            owners[adapter] = (profile_name, profile_home)
 
             try:
                 with _profile_runtime_scope(profile_home):
-                    success = await self._connect_adapter_with_timeout(adapter, platform)
+                    if is_reconnect:
+                        success = await self._connect_adapter_with_timeout(
+                            adapter,
+                            platform,
+                            is_reconnect=True,
+                        )
+                    else:
+                        success = await self._connect_adapter_with_timeout(
+                            adapter,
+                            platform,
+                        )
                 if success:
                     profile_map[platform] = adapter
                     connected += 1
@@ -8910,6 +8991,97 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     exc_info=True,
                 )
         return connected
+
+    def _schedule_profile_reconnect(
+        self, profile_name: str, profile_home: "Path", platform: Platform
+    ) -> None:
+        """Start one retry loop for a failed multiplexed profile adapter."""
+        key = (profile_name, platform)
+        existing = getattr(self, "_profile_reconnect_tasks", {}).get(key)
+        if existing is not None and not existing.done():
+            return
+
+        task = asyncio.create_task(
+            self._profile_reconnect_loop(profile_name, profile_home, platform)
+        )
+        self._profile_reconnect_tasks[key] = task
+        self._background_tasks.add(task)
+
+        def _finished(done_task: asyncio.Task) -> None:
+            self._profile_reconnect_tasks.pop(key, None)
+            self._background_tasks.discard(done_task)
+
+        task.add_done_callback(_finished)
+
+    def _profile_reconnect_claims(
+        self, profile_name: str, platform: Platform
+    ) -> Dict[tuple, str]:
+        """Build credential claims excluding the failed profile slot."""
+        claimed: Dict[tuple, str] = {}
+        for claimed_platform, adapter in self.adapters.items():
+            fp = self._adapter_credential_fingerprint(adapter)
+            if fp is not None:
+                claimed[(claimed_platform, fp)] = "default"
+        for candidate_name, adapter_map in self._profile_adapters.items():
+            for claimed_platform, adapter in adapter_map.items():
+                if candidate_name == profile_name and claimed_platform == platform:
+                    continue
+                fp = self._adapter_credential_fingerprint(adapter)
+                if fp is not None:
+                    claimed[(claimed_platform, fp)] = candidate_name
+        return claimed
+
+    async def _profile_reconnect_loop(
+        self, profile_name: str, profile_home: "Path", platform: Platform
+    ) -> None:
+        """Retry one multiplexed adapter from its own profile configuration."""
+        attempt = 0
+        while self._running:
+            if platform in self._profile_adapters.get(profile_name, {}):
+                return
+            if attempt:
+                await asyncio.sleep(min(30 * (2 ** min(attempt - 1, 4)), 300))
+                if not self._running:
+                    return
+            attempt += 1
+            logger.info(
+                "Reconnecting %s (profile: %s, attempt %d)...",
+                platform.value,
+                profile_name,
+                attempt,
+            )
+            try:
+                lock = getattr(self, "_profile_reconnect_lock", None)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    self._profile_reconnect_lock = lock
+                async with lock:
+                    connected = await self._start_one_profile_adapters(
+                        profile_name,
+                        profile_home,
+                        self._profile_reconnect_claims(profile_name, platform),
+                        only_platform=platform,
+                        is_reconnect=True,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Reconnect %s failed (profile: %s): %s",
+                    platform.value,
+                    profile_name,
+                    exc,
+                )
+                connected = 0
+            if connected and platform in self._profile_adapters.get(
+                profile_name, {}
+            ):
+                logger.info(
+                    "✓ %s reconnected successfully (profile: %s)",
+                    platform.value,
+                    profile_name,
+                )
+                return
 
     def _make_profile_message_handler(self, profile_name: str):
         """Return a message handler that stamps source.profile then delegates.
