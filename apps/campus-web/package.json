@@ -9,6 +9,8 @@
     "start": "next start",
     "type-check": "tsc --noEmit",
     "lint": "eslint . --max-warnings=0",
+    "check": "npm run type-check && npm run lint",
+    "fix": "eslint . --fix",
     "e2e": "playwright test"
   },
   "dependencies": {
