@@ -60,6 +60,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-edit upstream/main
+          git commit --amend -m "merge: sync official Hermes main [skip ci]"
           git push origin "HEAD:refs/heads/$branch"
 
           if git diff --quiet "$base_sha"...HEAD -- optional-mcps/ hermes_cli/mcp_catalog.py; then
@@ -101,3 +102,17 @@ jobs:
             -f base_sha="$BASE_SHA" \
             -f pr_number="$PR_NUMBER" \
             -f mcp_catalog_changed="$MCP_CATALOG_CHANGED"
+
+          title="Validate upstream $(git rev-parse HEAD)"
+          for _ in $(seq 1 30); do
+            run_id=$(gh run list --workflow upstream-validation.yml --event workflow_dispatch \
+              --json databaseId,displayTitle \
+              --jq ".[] | select(.displayTitle == \"$title\") | .databaseId" \
+              | head -1)
+            [ -n "$run_id" ] && break
+            sleep 2
+          done
+          [ -n "${run_id:-}" ] || { echo "Validation run was not created"; exit 1; }
+          gh run watch "$run_id" --exit-status
+          gh pr edit "$PR_NUMBER" --add-label upstream-validated
+          gh pr comment "$PR_NUMBER" --body "Trusted read-only upstream validation passed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}"

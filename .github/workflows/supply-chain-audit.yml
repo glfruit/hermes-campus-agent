@@ -47,8 +47,8 @@ on:
         default: ""
 
 permissions:
-  pull-requests: write
   contents: read
+  pull-requests: read
 
 jobs:
   scan:

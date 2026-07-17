@@ -1,4 +1,5 @@
 name: Validate upstream proposal
+run-name: Validate upstream ${{ inputs.proposal_sha }}
 
 on:
   workflow_dispatch:
@@ -24,7 +25,7 @@ on:
 # checkout data only: fixed GitHub-hosted runners, no environments, no secrets.
 permissions:
   contents: read
-  actions: read
+  pull-requests: read
 
 jobs:
   python:
@@ -35,11 +36,13 @@ jobs:
         with:
           ref: ${{ inputs.proposal_sha }}
           fetch-depth: 0
+          persist-credentials: false
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
       - run: uv python install 3.11
       - run: uv sync --locked --python 3.11 --extra all --extra dev
       - run: scripts/run_tests.sh
       - run: uv run ruff check .
+      - run: uv run python scripts/check-windows-footguns.py --all
 
   javascript-and-docs:
     runs-on: ubuntu-latest
@@ -48,6 +51,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ inputs.proposal_sha }}
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -61,6 +65,11 @@ jobs:
           done
       - run: npm ci
         working-directory: website
+      - run: python -m pip install ascii-guard==2.3.0 pyyaml==6.0.3
+      - run: python3 website/scripts/extract-skills.py
+      - run: python3 website/scripts/generate-skill-docs.py
+      - run: npm run lint:diagrams
+        working-directory: website
       - run: npm run build
         working-directory: website
 
@@ -72,6 +81,7 @@ jobs:
         with:
           ref: ${{ inputs.proposal_sha }}
           fetch-depth: 0
+          persist-credentials: false
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
       - name: Verify trusted ancestry and exact proposal
         env:
@@ -97,9 +107,18 @@ jobs:
               exit 1
             }
           done
+      - name: Require maintainer review labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          labels=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name')
+          printf '%s\n' "$labels" | grep -Fxq ci-reviewed
+          printf '%s\n' "$labels" | grep -Fxq supply-chain-reviewed
 
   supply-chain:
-    uses: glfruit/hermes-campus-agent/.github/workflows/supply-chain-audit.yml@main
+    uses: ./.github/workflows/supply-chain-audit.yml
     with:
       event_name: workflow_dispatch
       scan: true
@@ -109,29 +128,30 @@ jobs:
       head_sha: ${{ inputs.proposal_sha }}
       pull_request_number: ${{ inputs.pr_number }}
 
-  osv-inputs:
+  docker-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ inputs.proposal_sha }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+          persist-credentials: false
+      - uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.3.0
         with:
-          name: upstream-proposal-lockfiles
-          path: |
-            uv.lock
-            package-lock.json
-            website/package-lock.json
-          retention-days: 2
+          dockerfile: Dockerfile
+      - run: find docker -type f -name '*.sh' -print0 | xargs -0 shellcheck --severity=error
 
   osv:
-    needs: osv-inputs
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-    with:
-      download-artifact: upstream-proposal-lockfiles
-      scan-args: |-
-        --lockfile=uv.lock
-        --lockfile=package-lock.json
-        --lockfile=website/package-lock.json
-      upload-sarif: false
-      fail-on-vuln: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.proposal_sha }}
+          persist-credentials: false
+      - name: Scan proposal lockfiles
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --lockfile=uv.lock
+            --lockfile=package-lock.json
+            --lockfile=website/package-lock.json

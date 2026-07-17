@@ -8914,6 +8914,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 continue
 
+            # Inject before fingerprinting or any cleanup path. Duplicate
+            # credentials are disconnected below, and disconnect() itself
+            # persists lifecycle state.
+            adapter._runtime_status_path = Path(profile_home) / "gateway_state.json"
+
             # Same-token conflict detection — refuse a duplicate poll.
             fp = self._adapter_credential_fingerprint(adapter)
             if fp is not None:
@@ -8948,7 +8953,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 owners = _weakref.WeakKeyDictionary()
                 self._profile_adapter_owners = owners
             owners[adapter] = (profile_name, profile_home)
-            adapter._runtime_status_path = Path(profile_home) / "gateway_state.json"
 
             try:
                 with _profile_runtime_scope(profile_home):
