@@ -1,0 +1,196 @@
+name: Validate upstream proposal
+run-name: Validate upstream ${{ inputs.correlation }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      proposal_sha:
+        description: Exact proposal commit to validate
+        required: true
+        type: string
+      base_sha:
+        description: Trusted fork main commit before the merge
+        required: true
+        type: string
+      pr_number:
+        description: Sync proposal pull request number
+        required: true
+        type: string
+      mcp_catalog_changed:
+        description: Whether MCP catalog review paths changed
+        required: true
+        type: boolean
+      correlation:
+        description: Unique dispatch correlation identifier
+        required: true
+        type: string
+
+# This definition is always dispatched from trusted main. Proposal code is
+# checkout data only: fixed GitHub-hosted runners, no environments, no secrets.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.proposal_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          enable-cache: false
+      - run: uv python install 3.11
+      - run: uv sync --locked --python 3.11 --extra all --extra dev
+      - run: scripts/run_tests.sh
+      - run: uv run ruff check .
+      - run: uv run python scripts/check-windows-footguns.py --all
+
+  javascript-and-docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.proposal_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Check every npm workspace
+        run: |
+          set -euo pipefail
+          npm query .workspace | jq -r '.[].location' | while read -r workspace; do
+            npm run --prefix "$workspace" check
+          done
+      - run: npm ci
+        working-directory: website
+      - run: python -m pip install ascii-guard==2.3.0 pyyaml==6.0.3
+      - run: python3 website/scripts/extract-skills.py
+      - run: python3 website/scripts/generate-skill-docs.py
+      - run: npm run lint:diagrams
+        working-directory: website
+      - run: npm run build
+        working-directory: website
+
+  repository-invariants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.proposal_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          enable-cache: false
+      - name: Verify trusted ancestry and exact proposal
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          PROPOSAL_SHA: ${{ inputs.proposal_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PROPOSAL_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+      - run: uv lock --check
+      - run: npm ci --ignore-scripts
+      - name: Check new contributor attribution
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+        run: |
+          set -euo pipefail
+          git log "$BASE_SHA"..HEAD --format='%ae' --no-merges | sort -u | while read -r email; do
+            case "$email" in
+              ""|*teknium*|*noreply@github.com*|*dependabot*|*github-actions*|*anthropic.com*|*cursor.com*|*+*@users.noreply.github.com*) continue ;;
+            esac
+            rg -q --fixed-strings "\"${email}\"" scripts/release.py || {
+              echo "::error::Unmapped contributor email: ${email}"
+              exit 1
+            }
+          done
+
+  supply-chain:
+    uses: ./.github/workflows/supply-chain-audit.yml
+    with:
+      event_name: workflow_dispatch
+      scan: true
+      deps: true
+      mcp_catalog: ${{ inputs.mcp_catalog_changed }}
+      base_sha: ${{ inputs.base_sha }}
+      head_sha: ${{ inputs.proposal_sha }}
+      pull_request_number: ${{ inputs.pr_number }}
+
+  docker-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.proposal_sha }}
+          persist-credentials: false
+      - uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.3.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+          failure-threshold: warning
+      - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
+        env:
+          SHELLCHECK_OPTS: --severity=error
+        with:
+          scandir: ./docker
+
+  osv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.proposal_sha }}
+          persist-credentials: false
+      - name: Scan proposal lockfiles
+        id: scan
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --format=json
+            --output=osv-results.json
+            --lockfile=uv.lock
+            --lockfile=package-lock.json
+            --lockfile=website/package-lock.json
+      - name: Reject scanner infrastructure failures
+        if: steps.scan.outcome == 'failure'
+        run: test -s osv-results.json
+
+  all-checks-pass:
+    name: All checks pass
+    if: always()
+    needs:
+      - python
+      - javascript-and-docs
+      - repository-invariants
+      - supply-chain
+      - docker-lint
+      - osv
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate validation results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS"])
+          failed = [name for name, info in needs.items() if info["result"] != "success"]
+          if failed:
+              print(f"Validation failed: {', '.join(failed)}")
+              sys.exit(1)
+          print("All trusted validation jobs passed.")
+          PY
