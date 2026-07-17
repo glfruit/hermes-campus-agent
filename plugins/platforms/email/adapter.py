@@ -4,7 +4,8 @@ Email platform adapter for the Hermes gateway.
 Allows users to interact with Hermes by sending emails.
 Uses IMAP to receive and SMTP to send messages.
 
-Environment variables:
+Legacy environment-variable compatibility (new setups use config.yaml for
+ordinary settings and .env only for EMAIL_PASSWORD):
     EMAIL_IMAP_HOST     — IMAP server host (e.g., imap.gmail.com)
     EMAIL_IMAP_PORT     — IMAP server port (default: 993)
     EMAIL_SMTP_HOST     — SMTP server host (e.g., smtp.gmail.com)

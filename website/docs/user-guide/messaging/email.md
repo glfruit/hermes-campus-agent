@@ -62,24 +62,31 @@ Select **Email** from the platform menu. The wizard prompts for your email addre
 
 ### Manual Configuration
 
-Add to `~/.hermes/.env`:
+Add ordinary settings to `~/.hermes/config.yaml`:
+
+```yaml
+platforms:
+  email:
+    enabled: true
+    extra:
+      address: hermes@gmail.com
+      imap_host: imap.gmail.com
+      imap_port: 993
+      smtp_host: smtp.gmail.com
+      smtp_port: 587
+      poll_interval: 15
+      allowed_users: your@email.com,colleague@work.com
+      allow_all_users: false
+```
+
+Store only the password in `~/.hermes/.env`:
 
 ```bash
-# Required
-EMAIL_ADDRESS=hermes@gmail.com
-EMAIL_PASSWORD=abcd efgh ijkl mnop    # App password (not your regular password)
-EMAIL_IMAP_HOST=imap.gmail.com
-EMAIL_SMTP_HOST=smtp.gmail.com
-
-# Security (recommended)
-EMAIL_ALLOWED_USERS=your@email.com,colleague@work.com
-
-# Optional
-EMAIL_IMAP_PORT=993                    # Default: 993 (IMAP SSL)
-EMAIL_SMTP_PORT=587                    # Default: 587 (SMTP STARTTLS)
-EMAIL_POLL_INTERVAL=15                 # Seconds between inbox checks (default: 15)
-EMAIL_HOME_ADDRESS=your@email.com      # Default delivery target for cron jobs
+EMAIL_PASSWORD=abcd efgh ijkl mnop    # App password, not your regular password
 ```
+
+Legacy `EMAIL_*` environment variables for ordinary settings remain supported
+for existing installations, but `config.yaml` takes precedence.
 
 ---
 
@@ -176,23 +183,24 @@ Email access is stricter by default than chat-style platforms:
 :::
 
 - Use **App Passwords** instead of your main password (required for Gmail with 2FA)
-- Set `EMAIL_ALLOWED_USERS` to restrict who can interact with the agent
+- Set `platforms.email.extra.allowed_users` to restrict who can interact with the agent
 - The password is stored in `~/.hermes/.env` — protect this file (`chmod 600`)
 - IMAP uses SSL (port 993) and SMTP uses STARTTLS (port 587) by default — connections are encrypted
 
 ---
 
-## Environment Variables Reference
+## Configuration Reference
 
-| Variable | Required | Default | Description |
+| Config key under `platforms.email.extra` | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `EMAIL_ADDRESS` | Yes | — | Agent's email address |
-| `EMAIL_PASSWORD` | Yes | — | Email password or app password |
-| `EMAIL_IMAP_HOST` | Yes | — | IMAP server host (e.g., `imap.gmail.com`) |
-| `EMAIL_SMTP_HOST` | Yes | — | SMTP server host (e.g., `smtp.gmail.com`) |
-| `EMAIL_IMAP_PORT` | No | `993` | IMAP server port |
-| `EMAIL_SMTP_PORT` | No | `587` | SMTP server port |
-| `EMAIL_POLL_INTERVAL` | No | `15` | Seconds between inbox checks |
-| `EMAIL_ALLOWED_USERS` | No | — | Comma-separated allowed sender addresses |
-| `EMAIL_HOME_ADDRESS` | No | — | Default delivery target for cron jobs |
-| `EMAIL_ALLOW_ALL_USERS` | No | `false` | Allow all senders (not recommended) |
+| `address` | Yes | — | Agent's email address |
+| `imap_host` | Yes | — | IMAP server host (e.g., `imap.gmail.com`) |
+| `smtp_host` | Yes | — | SMTP server host (e.g., `smtp.gmail.com`) |
+| `imap_port` | No | `993` | IMAP server port |
+| `smtp_port` | No | `587` | SMTP server port |
+| `poll_interval` | No | `15` | Seconds between inbox checks |
+| `allowed_users` | No | — | Comma-separated allowed sender addresses |
+| `allow_all_users` | No | `false` | Allow all senders (not recommended) |
+
+`EMAIL_PASSWORD` is the only required Email secret in `.env`. Configure the
+default cron/notification recipient with `platforms.email.home_channel`.
