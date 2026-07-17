@@ -88,6 +88,32 @@ class TestCheckRequirements(unittest.TestCase):
         self.assertFalse(check_email_requirements())
 
 
+def test_multiplex_profile_does_not_inherit_global_email_credentials(
+    tmp_path, monkeypatch
+):
+    """A profile secret scope is authoritative over process-global EMAIL_*.
+
+    A multiplex launch wrapper may retain credentials from another profile in
+    ``os.environ``.  Loading an empty profile must not auto-enable Email from
+    those unrelated credentials.
+    """
+    from gateway.config import Platform, load_gateway_config
+    from gateway.run import _profile_runtime_scope
+
+    profile_home = tmp_path / "empty-profile"
+    profile_home.mkdir()
+    monkeypatch.setenv("EMAIL_ADDRESS", "other-profile@example.com")
+    monkeypatch.setenv("EMAIL_PASSWORD", "other-profile-password")
+    monkeypatch.setenv("EMAIL_IMAP_HOST", "imap.other-profile.example")
+    monkeypatch.setenv("EMAIL_SMTP_HOST", "smtp.other-profile.example")
+
+    with _profile_runtime_scope(profile_home):
+        config = load_gateway_config()
+
+    email_config = config.platforms.get(Platform.EMAIL)
+    assert email_config is None or email_config.enabled is False
+
+
 class TestHelperFunctions(unittest.TestCase):
     """Test email parsing helper functions."""
 
