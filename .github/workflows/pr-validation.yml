@@ -11,6 +11,9 @@ permissions:
   contents: read
   pull-requests: read
 
+env:
+  GH_REPO: ${{ github.repository }}
+
 jobs:
   invalidate-stale-reviews:
     if: github.event.action == 'synchronize'
@@ -99,7 +102,7 @@ jobs:
           run_id=""
           if [ "$REVIEW_RESULT" = success ]; then
             correlation="pr-${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            gh workflow run upstream-validation.yml \
+            gh workflow run upstream-validation.yml --repo "$GITHUB_REPOSITORY" \
               -f proposal_sha="$HEAD_SHA" \
               -f base_sha="$BASE_SHA" \
               -f pr_number="$PR_NUMBER" \
@@ -107,7 +110,8 @@ jobs:
               -f correlation="$correlation"
             title="Validate upstream $correlation"
             for _ in $(seq 1 30); do
-              run_id=$(gh run list --workflow upstream-validation.yml --event workflow_dispatch \
+              run_id=$(gh run list --repo "$GITHUB_REPOSITORY" \
+                --workflow upstream-validation.yml --event workflow_dispatch \
                 --json databaseId,displayTitle \
                 --jq ".[] | select(.displayTitle == \"$title\") | .databaseId" \
                 | head -1)
@@ -116,8 +120,8 @@ jobs:
             done
             if [ -z "$run_id" ]; then
               echo "Validation run was not created"
-            elif gh run watch "$run_id" --exit-status; then
-              current_head=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+            elif gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status; then
+              current_head=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
               [ "$current_head" = "$HEAD_SHA" ] && state=success
             fi
           fi
