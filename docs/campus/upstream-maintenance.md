@@ -19,6 +19,10 @@
 4. 创建面向 fork `main` 的 PR；
 5. 对该 PR 分支触发完整 CI。
 
+仓库的 Actions workflow 权限必须保持默认只读，同时启用
+**Allow GitHub Actions to create and approve pull requests**。同步 workflow 仅为自身显式申请
+`contents: write`、`pull-requests: write` 和 `actions: write`，其他 workflow 不会继承写权限。
+
 只有在 CI 通过并完成代码审查后才合并 PR。合并后，生产机可以运行：
 
 ```bash
