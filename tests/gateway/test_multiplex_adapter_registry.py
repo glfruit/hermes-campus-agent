@@ -636,13 +636,18 @@ class TestSecondaryProfileConfigHandling:
         assert connect_calls == [(relay, Platform.RELAY)]
 
     @pytest.mark.asyncio
-    async def test_secondary_same_config_token_is_refused(self, monkeypatch):
+    async def test_secondary_same_config_token_is_refused(
+        self, monkeypatch, tmp_path
+    ):
         """Adapters that keep their token on config still trip the mux guard."""
         from gateway.config import GatewayConfig, Platform, PlatformConfig
+        from gateway.platforms.base import BasePlatformAdapter, SendResult
 
-        class _ConfigTokenAdapter:
+        class _ConfigTokenAdapter(BasePlatformAdapter):
             def __init__(self, token):
-                self.config = PlatformConfig(enabled=True, token=token)
+                super().__init__(
+                    PlatformConfig(enabled=True, token=token), Platform.TELEGRAM
+                )
                 self.disconnected = False
 
             async def connect(self):
@@ -650,6 +655,19 @@ class TestSecondaryProfileConfigHandling:
 
             async def disconnect(self):
                 self.disconnected = True
+                self._mark_disconnected()
+
+            async def send(self, chat_id, content, reply_to=None, metadata=None):
+                return SendResult(success=True)
+
+            async def get_chat_info(self, chat_id):
+                return {"id": chat_id}
+
+        root_home = tmp_path / "root"
+        profile_home = tmp_path / "profiles" / "reviewer"
+        root_home.mkdir()
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(root_home))
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner.config = GatewayConfig(multiplex_profiles=True)
@@ -676,12 +694,17 @@ class TestSecondaryProfileConfigHandling:
         monkeypatch.setattr(runner, "_adapter_disconnect_timeout_secs", lambda: 0)
 
         connected = await runner._start_one_profile_adapters(
-            "reviewer", "/tmp/x", claimed
+            "reviewer", profile_home, claimed
         )
 
         assert connected == 0
         assert duplicate.disconnected is True
         assert runner._profile_adapters["reviewer"] == {}
+        assert not (root_home / "gateway_state.json").exists()
+        from gateway.status import read_runtime_status
+
+        record = read_runtime_status(profile_home / "gateway_state.json")
+        assert record["platforms"]["telegram"]["state"] == "disconnected"
 
     def test_port_binding_set_covers_known_listeners(self):
         from gateway.run import _PORT_BINDING_PLATFORM_VALUES

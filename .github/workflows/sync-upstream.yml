@@ -9,6 +9,7 @@ permissions:
   actions: write
   contents: write
   pull-requests: write
+  statuses: write
 
 concurrency:
   group: sync-official-upstream
@@ -18,7 +19,7 @@ jobs:
   propose-sync:
     name: Propose upstream merge
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - name: Checkout campus main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -60,7 +61,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-edit upstream/main
-          git commit --amend -m "merge: sync official Hermes main [skip ci]"
           git push origin "HEAD:refs/heads/$branch"
 
           if git diff --quiet "$base_sha"...HEAD -- optional-mcps/ hermes_cli/mcp_catalog.py; then
@@ -97,13 +97,15 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           MCP_CATALOG_CHANGED: ${{ steps.merge.outputs.mcp_catalog_changed }}
         run: |
+          correlation="sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           gh workflow run upstream-validation.yml \
             -f proposal_sha="$(git rev-parse HEAD)" \
             -f base_sha="$BASE_SHA" \
             -f pr_number="$PR_NUMBER" \
-            -f mcp_catalog_changed="$MCP_CATALOG_CHANGED"
+            -f mcp_catalog_changed="$MCP_CATALOG_CHANGED" \
+            -f correlation="$correlation"
 
-          title="Validate upstream $(git rev-parse HEAD)"
+          title="Validate upstream $correlation"
           for _ in $(seq 1 30); do
             run_id=$(gh run list --workflow upstream-validation.yml --event workflow_dispatch \
               --json databaseId,displayTitle \
@@ -114,5 +116,17 @@ jobs:
           done
           [ -n "${run_id:-}" ] || { echo "Validation run was not created"; exit 1; }
           gh run watch "$run_id" --exit-status
+          proposal_sha=$(git rev-parse HEAD)
+          current_head=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+          [ "$current_head" = "$proposal_sha" ] || {
+            echo "PR head changed during validation; refusing stale success."
+            exit 1
+          }
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${proposal_sha}" \
+            -f state=success \
+            -f context=upstream-validation \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+            -f description="Trusted read-only upstream validation passed"
           gh pr edit "$PR_NUMBER" --add-label upstream-validated
-          gh pr comment "$PR_NUMBER" --body "Trusted read-only upstream validation passed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+          gh pr comment "$PR_NUMBER" --body "Trusted read-only upstream validation passed for commit \`${proposal_sha}\`: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}"

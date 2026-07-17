@@ -1,0 +1,41 @@
+name: Validate pull request
+
+# pull_request_target keeps the workflow definition on trusted main. The
+# called validator checks out the proposed SHA without persisting credentials.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    outputs:
+      mcp_catalog_changed: ${{ steps.paths.outputs.mcp_catalog_changed }}
+    steps:
+      - id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+            --jq '.[].filename' \
+            | grep -Eq '^(optional-mcps/|hermes_cli/mcp_catalog\.py$)'; then
+            echo "mcp_catalog_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mcp_catalog_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  validation:
+    needs: classify
+    uses: ./.github/workflows/upstream-validation.yml
+    with:
+      proposal_sha: ${{ github.event.pull_request.head.sha }}
+      base_sha: ${{ github.event.pull_request.base.sha }}
+      pr_number: ${{ github.event.pull_request.number }}
+      mcp_catalog_changed: ${{ needs.classify.outputs.mcp_catalog_changed == 'true' }}
+      correlation: pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}

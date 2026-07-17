@@ -1,7 +1,24 @@
 name: Validate upstream proposal
-run-name: Validate upstream ${{ inputs.proposal_sha }}
+run-name: Validate upstream ${{ inputs.correlation }}
 
 on:
+  workflow_call:
+    inputs:
+      proposal_sha:
+        required: true
+        type: string
+      base_sha:
+        required: true
+        type: string
+      pr_number:
+        required: true
+        type: string
+      mcp_catalog_changed:
+        required: true
+        type: boolean
+      correlation:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       proposal_sha:
@@ -20,6 +37,10 @@ on:
         description: Whether MCP catalog review paths changed
         required: true
         type: boolean
+      correlation:
+        description: Unique dispatch correlation identifier
+        required: true
+        type: string
 
 # This definition is always dispatched from trusted main. Proposal code is
 # checkout data only: fixed GitHub-hosted runners, no environments, no secrets.
@@ -107,15 +128,6 @@ jobs:
               exit 1
             }
           done
-      - name: Require maintainer review labels
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-        run: |
-          set -euo pipefail
-          labels=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name')
-          printf '%s\n' "$labels" | grep -Fxq ci-reviewed
-          printf '%s\n' "$labels" | grep -Fxq supply-chain-reviewed
 
   supply-chain:
     uses: ./.github/workflows/supply-chain-audit.yml
@@ -138,7 +150,13 @@ jobs:
       - uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.3.0
         with:
           dockerfile: Dockerfile
-      - run: find docker -type f -name '*.sh' -print0 | xargs -0 shellcheck --severity=error
+          config: .hadolint.yaml
+          failure-threshold: warning
+      - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
+        env:
+          SHELLCHECK_OPTS: --severity=error
+        with:
+          scandir: ./docker
 
   osv:
     runs-on: ubuntu-latest
@@ -155,3 +173,32 @@ jobs:
             --lockfile=uv.lock
             --lockfile=package-lock.json
             --lockfile=website/package-lock.json
+
+  all-checks-pass:
+    name: All checks pass
+    if: always()
+    needs:
+      - python
+      - javascript-and-docs
+      - repository-invariants
+      - supply-chain
+      - docker-lint
+      - osv
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate validation results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS"])
+          failed = [name for name, info in needs.items() if info["result"] != "success"]
+          if failed:
+              print(f"Validation failed: {', '.join(failed)}")
+              sys.exit(1)
+          print("All trusted validation jobs passed.")
+          PY
