@@ -114,6 +114,57 @@ def test_multiplex_profile_does_not_inherit_global_email_credentials(
     assert email_config is None or email_config.enabled is False
 
 
+def test_multiplex_email_adapter_uses_its_profile_credentials(tmp_path, monkeypatch):
+    """A configured profile owns Email connection and access-control values."""
+    from gateway.config import Platform, load_gateway_config
+    from gateway.platform_registry import platform_registry
+    from gateway.run import _profile_runtime_scope
+
+    profile_home = tmp_path / "email-profile"
+    profile_home.mkdir()
+    (profile_home / ".env").write_text(
+        "\n".join(
+            (
+                "EMAIL_ADDRESS=profile@example.com",
+                "EMAIL_PASSWORD=profile-password",
+                "EMAIL_IMAP_HOST=imap.profile.example",
+                "EMAIL_IMAP_PORT=1993",
+                "EMAIL_SMTP_HOST=smtp.profile.example",
+                "EMAIL_SMTP_PORT=1587",
+                "EMAIL_POLL_INTERVAL=42",
+                "EMAIL_ALLOWED_USERS=trusted@example.com",
+                "EMAIL_ALLOW_ALL_USERS=false",
+                "EMAIL_TRUST_FROM_HEADER=true",
+                "EMAIL_AUTHSERV_ID=mx.profile.example",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EMAIL_ADDRESS", "other-profile@example.com")
+    monkeypatch.setenv("EMAIL_PASSWORD", "other-profile-password")
+    monkeypatch.setenv("EMAIL_IMAP_HOST", "imap.other-profile.example")
+    monkeypatch.setenv("EMAIL_SMTP_HOST", "smtp.other-profile.example")
+
+    with _profile_runtime_scope(profile_home):
+        config = load_gateway_config()
+        email_config = config.platforms[Platform.EMAIL]
+        adapter = platform_registry.create_adapter("email", email_config)
+
+        assert email_config.enabled is True
+        assert adapter is not None
+        assert adapter._address == "profile@example.com"
+        assert adapter._password == "profile-password"
+        assert adapter._imap_host == "imap.profile.example"
+        assert adapter._imap_port == 1993
+        assert adapter._smtp_host == "smtp.profile.example"
+        assert adapter._smtp_port == 1587
+        assert adapter._poll_interval == 42
+        assert adapter._allowlist_in_effect() is True
+        assert adapter._allow_all_senders() is False
+        assert adapter._require_authenticated_sender is False
+        assert adapter._authserv_id == "mx.profile.example"
+
+
 class TestHelperFunctions(unittest.TestCase):
     """Test email parsing helper functions."""
 
