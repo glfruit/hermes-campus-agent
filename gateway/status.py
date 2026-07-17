@@ -796,6 +796,7 @@ def write_pid_file() -> None:
 
 def write_runtime_status(
     *,
+    path: Optional[Path] = None,
     gateway_state: Any = _UNSET,
     exit_reason: Any = _UNSET,
     restart_requested: Any = _UNSET,
@@ -807,7 +808,7 @@ def write_runtime_status(
     served_profiles: Any = _UNSET,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
-    path = _get_runtime_status_path()
+    path = path or _get_runtime_status_path()
     payload = _read_json_file(path) or _build_runtime_status_record()
     current_record = _build_pid_record()
     payload.setdefault("platforms", {})

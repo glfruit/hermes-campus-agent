@@ -1,0 +1,32 @@
+name: Validate upstream proposal
+
+on:
+  workflow_dispatch:
+
+# Upstream proposal branches contain code that has not been reviewed by this
+# fork's maintainers. Keep this workflow read-only and do not pass secrets.
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+    with:
+      slice_count: 8
+
+  lint:
+    uses: ./.github/workflows/lint.yml
+    with:
+      event_name: workflow_dispatch
+
+  js:
+    uses: ./.github/workflows/js-tests.yml
+
+  docs:
+    uses: ./.github/workflows/docs-site-checks.yml
+
+  lockfile:
+    uses: ./.github/workflows/uv-lockfile-check.yml
+
+  docker-lint:
+    uses: ./.github/workflows/docker-lint.yml

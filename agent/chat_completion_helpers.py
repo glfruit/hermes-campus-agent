@@ -1510,19 +1510,13 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             fb_provider == "anthropic"
             or fb_base_url.rstrip("/").lower().endswith("/anthropic")
             or base_url_hostname(fb_base_url) == "api.anthropic.com"
-            or (
-                base_url_host_matches(fb_base_url, "api.kimi.com")
-                and "/coding" in fb_base_url.lower()
-            )
         ):
             # Custom providers (e.g. cron-anthropic) point at the native
             # api.anthropic.com host with no "/anthropic" path suffix, so the
             # name/suffix checks above miss them and they default to
             # chat_completions → POST /v1/chat/completions → 404. Match the
             # host the same way determine_api_mode() and _detect_api_mode_for_url()
-            # do on the primary path. Kimi Code's /coding endpoint is also
-            # Anthropic Messages; chat completions hit /coding/chat/completions
-            # and return 404. (#32243, #49247)
+            # do on the primary path. (#32243, #49247)
             fb_api_mode = "anthropic_messages"
         elif _fb_is_azure:
             # Azure OpenAI serves gpt-5.x on /chat/completions — does NOT

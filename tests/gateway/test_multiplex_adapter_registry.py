@@ -27,6 +27,12 @@ class _FatalProfileAdapter:
         self.disconnect_calls += 1
 
 
+class _DisconnectFailureProfileAdapter(_FatalProfileAdapter):
+    async def disconnect(self):
+        self.disconnect_calls += 1
+        raise RuntimeError("disconnect failed")
+
+
 class TestCredentialFingerprint:
     def test_none_without_token(self):
         assert GatewayRunner._adapter_credential_fingerprint(_FakeAdapter()) is None
@@ -197,6 +203,52 @@ class TestProfileReconnectOwnership:
         )
 
     @pytest.mark.asyncio
+    async def test_secondary_fatal_writes_only_its_profile_status(
+        self, tmp_path, monkeypatch
+    ):
+        root_home = tmp_path / "root"
+        profile_home = tmp_path / "profiles" / "edu-tl"
+        root_home.mkdir()
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(root_home))
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        adapter = _FatalProfileAdapter()
+        runner.adapters = {}
+        runner._profile_adapters = {"edu-tl": {Platform.TELEGRAM: adapter}}
+        runner._profile_homes = {"edu-tl": profile_home}
+        runner._failed_platforms = {}
+        runner.delivery_router = MagicMock()
+        runner._schedule_profile_reconnect = MagicMock()
+
+        await runner._handle_adapter_fatal_error(adapter)
+
+        from gateway.status import read_runtime_status
+
+        assert not (root_home / "gateway_state.json").exists()
+        record = read_runtime_status(profile_home / "gateway_state.json")
+        assert record["platforms"]["telegram"]["state"] == "retrying"
+
+    @pytest.mark.asyncio
+    async def test_disconnect_failure_does_not_prevent_profile_reconnect(self, tmp_path):
+        runner = GatewayRunner.__new__(GatewayRunner)
+        adapter = _DisconnectFailureProfileAdapter()
+        runner.adapters = {}
+        runner._profile_adapters = {"edu-tl": {Platform.TELEGRAM: adapter}}
+        runner._profile_homes = {"edu-tl": tmp_path}
+        runner._failed_platforms = {}
+        runner.delivery_router = MagicMock()
+        runner._update_platform_runtime_status = MagicMock()
+        runner._schedule_profile_reconnect = MagicMock()
+
+        await runner._handle_adapter_fatal_error(adapter)
+
+        assert adapter.disconnect_calls == 1
+        runner._schedule_profile_reconnect.assert_called_once_with(
+            "edu-tl", tmp_path, Platform.TELEGRAM
+        )
+
+    @pytest.mark.asyncio
     async def test_reconnect_loop_rebuilds_only_failed_profile(self, tmp_path):
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._running = True
@@ -214,6 +266,29 @@ class TestProfileReconnectOwnership:
             }
             runner._profile_adapters[profile_name][Platform.TELEGRAM] = object()
             return 1
+
+        runner._start_one_profile_adapters = AsyncMock(side_effect=reconnect)
+        runner._profile_reconnect_claims = MagicMock(return_value={})
+
+        await runner._profile_reconnect_loop(
+            "edu-tl", tmp_path, Platform.TELEGRAM
+        )
+
+        runner._start_one_profile_adapters.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_loop_stops_after_non_retryable_failure(self, tmp_path):
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._running = True
+        runner.adapters = {}
+        runner._profile_adapters = {"edu-tl": {}}
+        runner._profile_terminal_reconnects = set()
+
+        async def reconnect(profile_name, _profile_home, _claimed, **_kwargs):
+            runner._profile_terminal_reconnects.add(
+                (profile_name, Platform.TELEGRAM)
+            )
+            return 0
 
         runner._start_one_profile_adapters = AsyncMock(side_effect=reconnect)
         runner._profile_reconnect_claims = MagicMock(return_value={})

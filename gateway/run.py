@@ -2929,6 +2929,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._profile_homes: Dict[str, Path] = {}
         self._profile_adapter_owners: Any = _weakref.WeakKeyDictionary()
         self._profile_reconnect_tasks: Dict[tuple[str, Platform], asyncio.Task] = {}
+        self._profile_terminal_reconnects: set[tuple[str, Platform]] = set()
         # _profile_runtime_scope temporarily changes the process-wide
         # HERMES_HOME. Never let two profile reconnects overlap that scope.
         self._profile_reconnect_lock = asyncio.Lock()
@@ -4170,13 +4171,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         else:
             platform_state = "fatal"
         if profile_name is not None and profile_home is not None:
-            with _profile_runtime_scope(profile_home):
-                self._update_platform_runtime_status(
-                    adapter.platform.value,
-                    platform_state=platform_state,
-                    error_code=adapter.fatal_error_code,
-                    error_message=adapter.fatal_error_message,
-                )
+            self._update_platform_runtime_status(
+                adapter.platform.value,
+                status_path=Path(profile_home) / "gateway_state.json",
+                platform_state=platform_state,
+                error_code=adapter.fatal_error_code,
+                error_message=adapter.fatal_error_message,
+            )
         else:
             self._update_platform_runtime_status(
                 adapter.platform.value,
@@ -4188,7 +4189,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if profile_name is not None:
             profile_map = self._profile_adapters.get(profile_name, {})
             profile_map.pop(adapter.platform, None)
-            await adapter.disconnect()
+            await self._safe_adapter_disconnect(adapter, adapter.platform)
             if adapter.fatal_error_retryable and profile_home is not None:
                 self._schedule_profile_reconnect(
                     profile_name, profile_home, adapter.platform
@@ -4799,6 +4800,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self,
         platform: str,
         *,
+        status_path: Optional[Path] = None,
         platform_state: Optional[str] = None,
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
@@ -4806,6 +4808,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from gateway.status import write_runtime_status
             write_runtime_status(
+                path=status_path,
                 platform=platform,
                 platform_state=platform_state,
                 error_code=error_code,
@@ -8960,10 +8963,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             platform,
                         )
                 if success:
+                    getattr(self, "_profile_terminal_reconnects", set()).discard(
+                        (profile_name, platform)
+                    )
                     profile_map[platform] = adapter
                     connected += 1
                     logger.info("✓ %s connected (profile: %s)", platform.value, profile_name)
                 else:
+                    if (
+                        is_reconnect
+                        and getattr(adapter, "fatal_error_code", None)
+                        and not getattr(adapter, "fatal_error_retryable", True)
+                    ):
+                        terminal = getattr(self, "_profile_terminal_reconnects", None)
+                        if terminal is None:
+                            terminal = set()
+                            self._profile_terminal_reconnects = terminal
+                        terminal.add((profile_name, platform))
                     logger.warning("✗ %s failed to connect (profile: %s)", platform.value, profile_name)
                     await self._safe_adapter_disconnect(adapter, platform)
             except Exception as e:
@@ -8977,13 +8993,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # gateway_state.json. A previous shutdown/drain can leave the
                 # profile-level file at "draining"; clear that transient state
                 # once this multiplexed profile is accepting traffic again.
-                with _profile_runtime_scope(profile_home):
-                    write_runtime_status(
-                        gateway_state="running",
-                        exit_reason=None,
-                        restart_requested=self._restart_requested,
-                        active_agents=0,
-                    )
+                write_runtime_status(
+                    path=Path(profile_home) / "gateway_state.json",
+                    gateway_state="running",
+                    exit_reason=None,
+                    restart_requested=self._restart_requested,
+                    active_agents=0,
+                )
             except Exception:
                 logger.debug(
                     "could not mark profile %s runtime status running",
@@ -9078,6 +9094,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ):
                 logger.info(
                     "✓ %s reconnected successfully (profile: %s)",
+                    platform.value,
+                    profile_name,
+                )
+                return
+            if (profile_name, platform) in getattr(
+                self, "_profile_terminal_reconnects", set()
+            ):
+                logger.error(
+                    "Not retrying %s for profile %s after a non-retryable "
+                    "adapter failure",
                     platform.value,
                     profile_name,
                 )

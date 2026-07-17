@@ -17,13 +17,13 @@
 2. 在临时 `automation/upstream-sync-*` 分支执行普通 merge；
 3. 如果有冲突则停止，不修改 fork 的 `main`；
 4. 创建面向 fork `main` 的 PR；
-5. 对该 PR 分支触发完整 CI。
+5. 对该 PR 分支触发无 Secrets、只读权限的验证 workflow。
 
 仓库的 Actions workflow 权限必须保持默认只读，同时启用
 **Allow GitHub Actions to create and approve pull requests**。同步 workflow 仅为自身显式申请
 `contents: write`、`pull-requests: write` 和 `actions: write`，其他 workflow 不会继承写权限。
 
-只有在 CI 通过并完成代码审查后才合并 PR。合并后，生产机可以运行：
+同步提案不会运行带包发布或安全事件写权限的主 CI。只有在只读验证通过并完成代码审查后才合并 PR。合并后，生产机可以运行：
 
 ```bash
 hermes update

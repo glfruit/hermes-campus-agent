@@ -641,6 +641,27 @@ class TestGatewayRuntimeStatus:
         assert payload["platforms"]["telegram"]["error_code"] == "telegram_polling_conflict"
         assert payload["platforms"]["telegram"]["error_message"] == "another poller is active"
 
+    def test_write_runtime_status_can_target_a_profile_state_file(
+        self, tmp_path, monkeypatch
+    ):
+        root_home = tmp_path / "root"
+        profile_home = tmp_path / "profiles" / "edu-tl"
+        root_home.mkdir()
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(root_home))
+
+        profile_status = profile_home / "gateway_state.json"
+        status.write_runtime_status(
+            path=profile_status,
+            platform="telegram",
+            platform_state="retrying",
+            error_code="telegram_network_error",
+        )
+
+        assert not (root_home / "gateway_state.json").exists()
+        record = status.read_runtime_status(profile_status)
+        assert record["platforms"]["telegram"]["state"] == "retrying"
+
     def test_write_runtime_status_explicit_none_clears_stale_fields(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 

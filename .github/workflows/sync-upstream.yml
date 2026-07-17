@@ -77,9 +77,9 @@ jobs:
             --title "merge: sync official Hermes main" \
             --body "Automated merge of NousResearch/hermes-agent main into the campus distribution branch. Review conflicts and CI before merging; production only consumes fork/main."
 
-      - name: Run full CI on the proposal
+      - name: Run read-only validation on the proposal
         if: steps.merge.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           SYNC_BRANCH: ${{ steps.merge.outputs.branch }}
-        run: gh workflow run ci.yml --ref "$SYNC_BRANCH"
+        run: gh workflow run upstream-validation.yml --ref "$SYNC_BRANCH"
