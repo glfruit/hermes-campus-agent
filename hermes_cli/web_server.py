@@ -890,6 +890,7 @@ class MemoryProviderSetupRequest(BaseModel):
 class MessagingPlatformUpdate(BaseModel):
     enabled: Optional[bool] = None
     env: Dict[str, str] = {}
+    config: Dict[str, str] = {}
     clear_env: List[str] = []
     # Explicit body profile beats the query param injected by the global
     # dashboard profile switcher (same precedence as other scoped writes).
@@ -6599,6 +6600,11 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "env_vars": ("EMAIL_PASSWORD",),
         "required_env": ("EMAIL_PASSWORD",),
         "include_discovered_env": False,
+        "config_fields": (
+            {"key": "address", "prompt": "Email address", "required": True},
+            {"key": "imap_host", "prompt": "IMAP host", "required": True},
+            {"key": "smtp_host", "prompt": "SMTP host", "required": True},
+        ),
     },
     "sms": {
         "name": "SMS (Twilio)",
@@ -7031,6 +7037,7 @@ def _build_catalog_entry(
         "docs_url": override.get("docs_url", ""),
         "env_vars": env_vars,
         "required_env": required_env,
+        "config_fields": tuple(override.get("config_fields", ())),
     }
 
 
@@ -7080,6 +7087,8 @@ def _messaging_platform_payload(
         or get_runtime_status_running_pid(runtime) is not None
     )
     env_vars = []
+    plat_cfg: dict[str, Any] = {}
+    platform_config = None
 
     for key in entry["env_vars"]:
         # When profile-scoped, judge only the profile's own .env — the
@@ -7144,6 +7153,18 @@ def _messaging_platform_payload(
                 for key in entry["required_env"]
             )
             home_channel = None
+
+    extra_values = (
+        plat_cfg.get("extra", {})
+        if scoped
+        else (getattr(platform_config, "extra", {}) or {})
+    )
+    if not isinstance(extra_values, dict):
+        extra_values = {}
+    config_fields = [
+        {**field, "value": str(extra_values.get(field["key"], ""))}
+        for field in entry.get("config_fields", ())
+    ]
 
     state = (
         runtime_platform.get("state") if isinstance(runtime_platform, dict) else None
@@ -7213,6 +7234,7 @@ def _messaging_platform_payload(
         ),
         "home_channel": home_channel,
         "env_vars": env_vars,
+        "config_fields": config_fields,
     }
     if whatsapp_setup is not None:
         payload["whatsapp_setup"] = whatsapp_setup
@@ -7221,6 +7243,16 @@ def _messaging_platform_payload(
 
 def _write_platform_enabled(platform_id: str, enabled: bool) -> None:
     write_platform_config_field(platform_id, "enabled", enabled)
+
+
+def _write_platform_extra_values(platform_id: str, values: dict[str, str]) -> None:
+    """Persist allowlisted non-secret platform settings under config.yaml extra."""
+    config = read_raw_config()
+    platforms = config.setdefault("platforms", {})
+    platform_config = platforms.setdefault(platform_id, {})
+    extra = platform_config.setdefault("extra", {})
+    extra.update(values)
+    save_config(config, strip_defaults=False)
 
 
 _WHATSAPP_ONBOARDING_TTL_SECONDS = 600
@@ -8176,6 +8208,7 @@ async def update_messaging_platform(
             raise HTTPException(status_code=409, detail=conflict)
 
     allowed_env = set(entry["env_vars"])
+    allowed_config = {field["key"] for field in entry.get("config_fields", ())}
     try:
         with _profile_scope(body.profile or profile):
             for key in body.clear_env:
@@ -8197,17 +8230,31 @@ async def update_messaging_platform(
                     _validate_messaging_env_value(platform_id, key, trimmed)
                     save_env_value(key, trimmed)
 
+            config_values: dict[str, str] = {}
+            for key, value in body.config.items():
+                if key not in allowed_config:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{key} is not configurable for {entry['name']}",
+                    )
+                trimmed = value.strip()
+                if trimmed:
+                    config_values[key] = trimmed
+            if config_values:
+                _write_platform_extra_values(platform_id, config_values)
+
             if body.enabled is not None:
                 _write_platform_enabled(platform_id, body.enabled)
 
         # Audit trail for channel config mutations: names only, never values.
         _log.info(
             "Messaging platform updated: platform=%s profile=%s enabled=%s "
-            "env_keys=%s cleared_keys=%s",
+            "env_keys=%s config_keys=%s cleared_keys=%s",
             platform_id,
             target_profile or "current",
             body.enabled,
             sorted(body.env),
+            sorted(body.config),
             sorted(body.clear_env),
         )
         return {"ok": True, "platform": platform_id}

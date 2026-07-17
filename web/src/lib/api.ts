@@ -1501,6 +1501,15 @@ export interface MessagingPlatform {
     home_channel_set?: boolean;
   } | null;
   env_vars: MessagingPlatformEnvVar[];
+  config_fields: MessagingPlatformConfigField[];
+}
+
+export interface MessagingPlatformConfigField {
+  key: string;
+  prompt: string;
+  required: boolean;
+  description?: string;
+  value: string;
 }
 
 export interface MessagingPlatformsResponse {
@@ -1512,6 +1521,7 @@ export interface MessagingPlatformsResponse {
 export interface MessagingPlatformUpdate {
   enabled?: boolean;
   env?: Record<string, string>;
+  config?: Record<string, string>;
   clear_env?: string[];
 }
 

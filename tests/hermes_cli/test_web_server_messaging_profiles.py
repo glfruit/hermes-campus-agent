@@ -62,6 +62,10 @@ def _telegram(payload):
     return next(p for p in payload["platforms"] if p["id"] == "telegram")
 
 
+def _email(payload):
+    return next(p for p in payload["platforms"] if p["id"] == "email")
+
+
 def _env_field(platform, key):
     return next(f for f in platform["env_vars"] if f["key"] == key)
 
@@ -138,6 +142,48 @@ class TestProfileScopedMessagingReads:
 
 
 class TestProfileScopedMessagingWrites:
+    def test_email_write_splits_secret_env_from_yaml_config(
+        self, client, isolated_profiles
+    ):
+        resp = client.put(
+            "/api/messaging/platforms/email",
+            params={"profile": "worker_alpha"},
+            json={
+                "enabled": True,
+                "env": {"EMAIL_PASSWORD": "fake-app-password"},
+                "config": {
+                    "address": "hermes@example.com",
+                    "imap_host": "imap.example.com",
+                    "smtp_host": "smtp.example.com",
+                },
+            },
+        )
+        assert resp.status_code == 200
+
+        worker_home = isolated_profiles["worker_alpha"]
+        worker_env = (worker_home / ".env").read_text(encoding="utf-8")
+        assert "EMAIL_PASSWORD=fake-app-password" in worker_env
+        assert "EMAIL_ADDRESS" not in worker_env
+        config = yaml.safe_load((worker_home / "config.yaml").read_text())
+        email_config = config["platforms"]["email"]
+        assert email_config["enabled"] is True
+        assert email_config["extra"] == {
+            "address": "hermes@example.com",
+            "imap_host": "imap.example.com",
+            "smtp_host": "smtp.example.com",
+        }
+
+        payload = client.get(
+            "/api/messaging/platforms", params={"profile": "worker_alpha"}
+        ).json()
+        email = _email(payload)
+        assert email["configured"] is True
+        assert {field["key"]: field["value"] for field in email["config_fields"]} == {
+            "address": "hermes@example.com",
+            "imap_host": "imap.example.com",
+            "smtp_host": "smtp.example.com",
+        }
+
     def test_scoped_write_lands_in_target_profile_env(
         self, client, isolated_profiles
     ):

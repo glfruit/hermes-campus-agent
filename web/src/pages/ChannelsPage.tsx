@@ -28,6 +28,7 @@ import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { api } from "@/lib/api";
 import type {
   MessagingPlatform,
+  MessagingPlatformConfigField,
   MessagingPlatformEnvVar,
   MessagingPlatformUpdate,
   TelegramOnboardingStartResponse,
@@ -142,6 +143,7 @@ export default function ChannelsPage() {
   // Config modal state
   const [editing, setEditing] = useState<MessagingPlatform | null>(null);
   const [draftEnv, setDraftEnv] = useState<Record<string, string>>({});
+  const [draftConfig, setDraftConfig] = useState<Record<string, string>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const closeEdit = useCallback(() => {
@@ -179,6 +181,9 @@ export default function ChannelsPage() {
       initial[v.key] = "";
     });
     setDraftEnv(initial);
+    setDraftConfig(
+      Object.fromEntries(platform.config_fields.map((field) => [field.key, field.value])),
+    );
     setFieldErrors({});
     setEditing(platform);
   };
@@ -191,7 +196,11 @@ export default function ChannelsPage() {
     Object.entries(draftEnv).forEach(([k, v]) => {
       if (v.trim()) env[k] = v.trim();
     });
-    if (Object.keys(env).length === 0) {
+    const config: Record<string, string> = {};
+    Object.entries(draftConfig).forEach(([k, v]) => {
+      if (v.trim()) config[k] = v.trim();
+    });
+    if (Object.keys(env).length === 0 && Object.keys(config).length === 0) {
       showToast("Nothing to save — fill in at least one field.", "error");
       return;
     }
@@ -200,6 +209,13 @@ export default function ChannelsPage() {
     );
     if (missing.length > 0) {
       showToast(`${missing[0].prompt || missing[0].key} is required`, "error");
+      return;
+    }
+    const missingConfig = editing.config_fields.filter(
+      (field) => field.required && !config[field.key],
+    );
+    if (missingConfig.length > 0) {
+      showToast(`${missingConfig[0].prompt || missingConfig[0].key} is required`, "error");
       return;
     }
     const nextFieldErrors: Record<string, string> = {};
@@ -214,7 +230,7 @@ export default function ChannelsPage() {
     }
     setSaving(true);
     try {
-      const body: MessagingPlatformUpdate = { env, enabled: true };
+      const body: MessagingPlatformUpdate = { env, config, enabled: true };
       await api.updateMessagingPlatform(editing.id, body);
       showToast(`${editing.name} saved`, "success");
       setEditing(null);
@@ -448,6 +464,32 @@ export default function ChannelsPage() {
               <p className="text-xs text-muted-foreground">
                 {editing.description}
               </p>
+              {editing.config_fields.map((field: MessagingPlatformConfigField) => (
+                <div className="grid gap-1.5" key={`config-${field.key}`}>
+                  <Label htmlFor={`config-${field.key}`}>
+                    {field.prompt || field.key}
+                    {field.required ? " *" : ""}
+                  </Label>
+                  {field.description && (
+                    <span className="text-xs text-muted-foreground">
+                      {field.description}
+                    </span>
+                  )}
+                  <Input
+                    id={`config-${field.key}`}
+                    type="text"
+                    className="text-base leading-6 sm:text-xs sm:leading-4"
+                    placeholder={field.key}
+                    value={draftConfig[field.key] ?? ""}
+                    onChange={(e) =>
+                      setDraftConfig((prev) => ({
+                        ...prev,
+                        [field.key]: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+              ))}
               {editing.env_vars.map((field: MessagingPlatformEnvVar) => (
                 <div className="grid gap-1.5" key={field.key}>
                   <div className="flex items-center gap-1.5">
