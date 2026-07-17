@@ -54,6 +54,7 @@ jobs:
           fi
 
   review-gate:
+    if: always() && needs.classify.result == 'success'
     needs: classify
     runs-on: ubuntu-latest
     permissions:
