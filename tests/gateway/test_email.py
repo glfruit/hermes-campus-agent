@@ -14,6 +14,7 @@ Covers:
 
 import os
 import unittest
+from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -102,6 +103,8 @@ def test_multiplex_profile_does_not_inherit_global_email_credentials(
 
     profile_home = tmp_path / "empty-profile"
     profile_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
     monkeypatch.setenv("EMAIL_ADDRESS", "other-profile@example.com")
     monkeypatch.setenv("EMAIL_PASSWORD", "other-profile-password")
     monkeypatch.setenv("EMAIL_IMAP_HOST", "imap.other-profile.example")
@@ -115,29 +118,34 @@ def test_multiplex_profile_does_not_inherit_global_email_credentials(
 
 
 def test_multiplex_email_adapter_uses_its_profile_credentials(tmp_path, monkeypatch):
-    """A configured profile owns Email connection and access-control values."""
+    """A profile reads Email settings from config and only its password from env."""
     from gateway.config import Platform, load_gateway_config
     from gateway.platform_registry import platform_registry
     from gateway.run import _profile_runtime_scope
 
     profile_home = tmp_path / "email-profile"
     profile_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
     (profile_home / ".env").write_text(
-        "\n".join(
-            (
-                "EMAIL_ADDRESS=profile@example.com",
-                "EMAIL_PASSWORD=profile-password",
-                "EMAIL_IMAP_HOST=imap.profile.example",
-                "EMAIL_IMAP_PORT=1993",
-                "EMAIL_SMTP_HOST=smtp.profile.example",
-                "EMAIL_SMTP_PORT=1587",
-                "EMAIL_POLL_INTERVAL=42",
-                "EMAIL_ALLOWED_USERS=trusted@example.com",
-                "EMAIL_ALLOW_ALL_USERS=false",
-                "EMAIL_TRUST_FROM_HEADER=true",
-                "EMAIL_AUTHSERV_ID=mx.profile.example",
-            )
-        ),
+        "EMAIL_PASSWORD=profile-password\n", encoding="utf-8"
+    )
+    (profile_home / "config.yaml").write_text(
+        """platforms:
+  email:
+    enabled: true
+    extra:
+      address: profile@example.com
+      imap_host: imap.profile.example
+      imap_port: 1993
+      smtp_host: smtp.profile.example
+      smtp_port: 1587
+      poll_interval: 42
+      allowed_users: trusted@example.com
+      allow_all_users: false
+      require_authenticated_sender: false
+      authserv_id: mx.profile.example
+""",
         encoding="utf-8",
     )
     monkeypatch.setenv("EMAIL_ADDRESS", "other-profile@example.com")
@@ -1101,6 +1109,23 @@ class TestConnectDisconnect(unittest.TestCase):
             result = asyncio.run(adapter.connect())
             self.assertFalse(result)
             self.assertFalse(adapter._running)
+
+    def test_connect_stops_before_network_when_mailbox_is_already_in_use(self):
+        """A duplicate mailbox lock rejects startup before opening IMAP."""
+        import asyncio
+
+        adapter = self._make_adapter()
+
+        with patch.object(
+            adapter, "_acquire_platform_lock", return_value=False
+        ) as acquire_lock, patch("imaplib.IMAP4_SSL") as mock_imap:
+            result = asyncio.run(adapter.connect())
+
+        self.assertFalse(result)
+        acquire_lock.assert_called_once_with(
+            "email-address", "hermes@test.com", "Email address"
+        )
+        mock_imap.assert_not_called()
 
     def test_connect_smtp_failure(self):
         """SMTP connection failure returns False."""

@@ -73,9 +73,15 @@ def _profile_env(name: str, default: str = "") -> str:
     return value if value is not None else default
 
 
-def _profile_env_int(name: str, default: int) -> int:
-    raw = _profile_env(name).strip()
-    if not raw:
+def _config_text(extra: dict, key: str, env_name: str, default: str = "") -> str:
+    """Resolve a non-secret setting, preferring config.yaml over legacy env."""
+    raw = extra[key] if key in extra else _profile_env(env_name, default)
+    return str(raw).strip() if raw is not None else default
+
+
+def _config_int(extra: dict, key: str, env_name: str, default: int) -> int:
+    raw = extra[key] if key in extra else _profile_env(env_name)
+    if raw in (None, ""):
         return default
     try:
         return int(raw)
@@ -83,8 +89,9 @@ def _profile_env_int(name: str, default: int) -> int:
         return default
 
 
-def _profile_env_bool(name: str, default: bool = False) -> bool:
-    return is_truthy_value(_profile_env(name), default=default)
+def _config_bool(extra: dict, key: str, env_name: str, default: bool = False) -> bool:
+    raw = extra[key] if key in extra else _profile_env(env_name)
+    return is_truthy_value(raw, default=default)
 
 
 def _create_ipv4_connection(
@@ -189,6 +196,24 @@ def check_email_requirements() -> bool:
     imap = _profile_env("EMAIL_IMAP_HOST").strip()
     smtp = _profile_env("EMAIL_SMTP_HOST").strip()
     return all([addr, pwd, imap, smtp])
+
+
+def _email_dependencies_available() -> bool:
+    """Email uses only Python standard-library transport dependencies."""
+    return True
+
+
+def _validate_email_config(config: PlatformConfig) -> bool:
+    """Validate canonical config plus the password from the active secret scope."""
+    extra = config.extra or {}
+    return all(
+        (
+            _config_text(extra, "address", "EMAIL_ADDRESS"),
+            _profile_env("EMAIL_PASSWORD").strip(),
+            _config_text(extra, "imap_host", "EMAIL_IMAP_HOST"),
+            _config_text(extra, "smtp_host", "EMAIL_SMTP_HOST"),
+        )
+    )
 
 
 def _decode_header_value(raw: str) -> str:
@@ -445,22 +470,23 @@ class EmailAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.EMAIL)
 
-        # Resolve connection settings from the env vars first, then fall back to
-        # PlatformConfig.extra (address/imap_host/smtp_host) — the canonical dict
-        # gateway.config populates and that the "connected" check, the
-        # send-helper, and `hermes config show` already read. Without the
-        # fallback a config.yaml-only setup left these empty. Host/address values
-        # are stripped: a stray space or newline made IMAP4_SSL raise the
-        # misleading ``[Errno 8] nodename nor servname`` (an unresolvable name)
+        # Resolve non-secret connection settings from PlatformConfig.extra,
+        # falling back to scoped env vars for backward compatibility.
+        # Host/address values are stripped: a stray space or newline made
+        # IMAP4_SSL raise the misleading ``[Errno 8] nodename nor servname``
         # instead of an obvious "host not set" error.
         extra = config.extra or {}
-        self._address = (_profile_env("EMAIL_ADDRESS") or extra.get("address", "")).strip()
+        self._address = _config_text(extra, "address", "EMAIL_ADDRESS")
         self._password = _profile_env("EMAIL_PASSWORD")
-        self._imap_host = (_profile_env("EMAIL_IMAP_HOST") or extra.get("imap_host", "")).strip()
-        self._imap_port = _profile_env_int("EMAIL_IMAP_PORT", 993)
-        self._smtp_host = (_profile_env("EMAIL_SMTP_HOST") or extra.get("smtp_host", "")).strip()
-        self._smtp_port = _profile_env_int("EMAIL_SMTP_PORT", 587)
-        self._poll_interval = _profile_env_int("EMAIL_POLL_INTERVAL", 15)
+        self._imap_host = _config_text(extra, "imap_host", "EMAIL_IMAP_HOST")
+        self._imap_port = _config_int(extra, "imap_port", "EMAIL_IMAP_PORT", 993)
+        self._smtp_host = _config_text(extra, "smtp_host", "EMAIL_SMTP_HOST")
+        self._smtp_port = _config_int(extra, "smtp_port", "EMAIL_SMTP_PORT", 587)
+        self._poll_interval = _config_int(extra, "poll_interval", "EMAIL_POLL_INTERVAL", 15)
+        self._allowed_users = _config_text(extra, "allowed_users", "EMAIL_ALLOWED_USERS")
+        self._allow_all_users = _config_bool(
+            extra, "allow_all_users", "EMAIL_ALLOW_ALL_USERS"
+        )
 
         # Skip attachments — configured via config.yaml:
         #   platforms:
@@ -484,7 +510,7 @@ class EmailAdapter(BasePlatformAdapter):
         # gate below is skipped.
         if "require_authenticated_sender" in extra:
             self._require_authenticated_sender = bool(extra["require_authenticated_sender"])
-        elif _profile_env_bool("EMAIL_TRUST_FROM_HEADER", False):
+        elif _config_bool(extra, "trust_from_header", "EMAIL_TRUST_FROM_HEADER"):
             self._require_authenticated_sender = False
         else:
             self._require_authenticated_sender = True
@@ -493,8 +519,8 @@ class EmailAdapter(BasePlatformAdapter):
         # own receiving server (defends against an injected header that sorts
         # first). Defaults to the From-domain of the agent's own address.
         self._authserv_id = (
-            extra.get("authserv_id", "") or _profile_env("EMAIL_AUTHSERV_ID")
-        ).strip().lower()
+            _config_text(extra, "authserv_id", "EMAIL_AUTHSERV_ID")
+        ).lower()
 
         # Track message IDs we've already processed to avoid duplicates
         self._seen_uids: set = set()
@@ -600,6 +626,11 @@ class EmailAdapter(BasePlatformAdapter):
             )
             return False
 
+        if not self._acquire_platform_lock(
+            "email-address", self._address.lower(), "Email address"
+        ):
+            return False
+
         try:
             # Test IMAP connection
             imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
@@ -616,6 +647,7 @@ class EmailAdapter(BasePlatformAdapter):
             imap.logout()
             logger.info("[Email] IMAP connection test passed. %d existing messages skipped.", len(self._seen_uids))
         except Exception as e:
+            self._release_platform_lock()
             logger.error("[Email] IMAP connection failed: %s", e)
             return False
 
@@ -628,6 +660,7 @@ class EmailAdapter(BasePlatformAdapter):
                 smtp.quit()
             logger.info("[Email] SMTP connection test passed.")
         except Exception as e:
+            self._release_platform_lock()
             logger.error("[Email] SMTP connection failed: %s", e)
             return False
 
@@ -646,6 +679,7 @@ class EmailAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
             self._poll_task = None
+        self._release_platform_lock()
         logger.info("[Email] Disconnected.")
 
     async def _poll_loop(self) -> None:
@@ -765,8 +799,7 @@ class EmailAdapter(BasePlatformAdapter):
             logger.error("[Email] IMAP fetch error: %s", e)
         return results
 
-    @staticmethod
-    def _allow_all_senders() -> bool:
+    def _allow_all_senders(self) -> bool:
         """Return True when the operator opted into accepting any sender.
 
         Mirrors the gateway authz allow-all resolution: the per-platform
@@ -776,12 +809,11 @@ class EmailAdapter(BasePlatformAdapter):
         """
         truthy = {"true", "1", "yes"}
         return (
-            _profile_env("EMAIL_ALLOW_ALL_USERS").strip().lower() in truthy
+            self._allow_all_users
             or _profile_env("GATEWAY_ALLOW_ALL_USERS").strip().lower() in truthy
         )
 
-    @staticmethod
-    def _allowlist_in_effect() -> bool:
+    def _allowlist_in_effect(self) -> bool:
         """Return True when a sender allowlist gates email access.
 
         Authorization keys on the From: address only when an allowlist is
@@ -791,7 +823,7 @@ class EmailAdapter(BasePlatformAdapter):
         and the authentication gate is unnecessary.
         """
         return bool(
-            _profile_env("EMAIL_ALLOWED_USERS").strip()
+            self._allowed_users
             or _profile_env("GATEWAY_ALLOWED_USERS").strip()
         )
 
@@ -813,9 +845,9 @@ class EmailAdapter(BasePlatformAdapter):
         # that the gateway will never authorize.  Without this early guard,
         # a race between dispatch and authorization can result in the adapter
         # sending a reply even though the handler returned None.
-        allowed_raw = _profile_env("EMAIL_ALLOWED_USERS").strip()
+        allowed_raw = self._allowed_users
         if not allowed_raw:
-            if _profile_env("EMAIL_ALLOW_ALL_USERS").strip().lower() not in {"true", "1", "yes"} and (
+            if not self._allow_all_users and (
                 _profile_env("GATEWAY_ALLOW_ALL_USERS").strip().lower() not in {"true", "1", "yes"}
             ):
                 logger.debug(
@@ -1224,13 +1256,10 @@ async def _standalone_send(
     from email.utils import formatdate
 
     extra = getattr(pconfig, "extra", {}) or {}
-    address = extra.get("address") or _profile_env("EMAIL_ADDRESS")
+    address = _config_text(extra, "address", "EMAIL_ADDRESS")
     password = _profile_env("EMAIL_PASSWORD")
-    smtp_host = extra.get("smtp_host") or _profile_env("EMAIL_SMTP_HOST")
-    try:
-        smtp_port = int(_profile_env("EMAIL_SMTP_PORT", "587"))
-    except (ValueError, TypeError):
-        smtp_port = 587
+    smtp_host = _config_text(extra, "smtp_host", "EMAIL_SMTP_HOST")
+    smtp_port = _config_int(extra, "smtp_port", "EMAIL_SMTP_PORT", 587)
 
     if not all([address, password, smtp_host]):
         return {"error": "Email not configured (EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_SMTP_HOST required)"}
@@ -1277,7 +1306,8 @@ def register(ctx) -> None:
         name="email",
         label="Email",
         adapter_factory=_build_adapter,
-        check_fn=check_email_requirements,
+        check_fn=_email_dependencies_available,
+        validate_config=_validate_email_config,
         is_connected=_is_connected,
         required_env=["EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_SMTP_HOST"],
         install_hint="Email uses the Python stdlib (smtplib/imaplib) — no extra deps",
