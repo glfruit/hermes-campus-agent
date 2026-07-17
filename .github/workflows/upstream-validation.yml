@@ -109,7 +109,7 @@ jobs:
             case "$email" in
               ""|*teknium*|*noreply@github.com*|*dependabot*|*github-actions*|*anthropic.com*|*cursor.com*|*+*@users.noreply.github.com*) continue ;;
             esac
-            rg -q --fixed-strings "\"${email}\"" scripts/release.py || {
+            grep -qF "\"${email}\"" scripts/release.py || {
               echo "::error::Unmapped contributor email: ${email}"
               exit 1
             }
