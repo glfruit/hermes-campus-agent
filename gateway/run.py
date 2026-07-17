@@ -8948,6 +8948,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 owners = _weakref.WeakKeyDictionary()
                 self._profile_adapter_owners = owners
             owners[adapter] = (profile_name, profile_home)
+            adapter._runtime_status_path = Path(profile_home) / "gateway_state.json"
 
             try:
                 with _profile_runtime_scope(profile_home):
@@ -8980,6 +8981,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             terminal = set()
                             self._profile_terminal_reconnects = terminal
                         terminal.add((profile_name, platform))
+                        self._update_platform_runtime_status(
+                            platform.value,
+                            status_path=Path(profile_home) / "gateway_state.json",
+                            platform_state="fatal",
+                            error_code=adapter.fatal_error_code,
+                            error_message=adapter.fatal_error_message,
+                        )
                     logger.warning("✗ %s failed to connect (profile: %s)", platform.value, profile_name)
                     await self._safe_adapter_disconnect(adapter, platform)
             except Exception as e:

@@ -21,6 +21,29 @@ from gateway.platforms.base import (
 )
 
 
+class TestProfileRuntimeStatusPath:
+    def test_adapter_lifecycle_writes_only_injected_profile_path(
+        self, tmp_path, monkeypatch
+    ):
+        root_home = tmp_path / "root"
+        profile_home = tmp_path / "profiles" / "edu-tl"
+        root_home.mkdir()
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(root_home))
+
+        adapter = _CapturingAdapter()
+        adapter._runtime_status_path = profile_home / "gateway_state.json"
+
+        adapter._set_fatal_error("telegram_auth_error", "bad token", retryable=False)
+
+        from gateway.status import read_runtime_status
+
+        assert not (root_home / "gateway_state.json").exists()
+        record = read_runtime_status(profile_home / "gateway_state.json")
+        assert record["platforms"]["telegram"]["state"] == "fatal"
+        assert record["platforms"]["telegram"]["error_code"] == "telegram_auth_error"
+
+
 class TestInboundMediaSizeCap:
     """gateway.max_inbound_media_bytes caps inbound media buffered into RAM (#13145)."""
 

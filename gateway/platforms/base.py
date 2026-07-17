@@ -2388,6 +2388,10 @@ class BasePlatformAdapter(ABC):
         self._fatal_error_message: Optional[str] = None
         self._fatal_error_retryable = True
         self._fatal_error_handler: Optional[Callable[["BasePlatformAdapter"], Awaitable[None] | None]] = None
+        # Multiplexed secondary adapters persist lifecycle state in their own
+        # profile home. The runner injects this before connect(); None keeps
+        # the process-level status path for the primary adapter.
+        self._runtime_status_path = None
         
         # Track active message handlers per session for interrupt support.
         # _active_sessions stores the per-session interrupt Event; _session_tasks
@@ -2750,7 +2754,11 @@ class BasePlatformAdapter(ABC):
         """
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(platform=self.platform.value, **kwargs)
+            write_runtime_status(
+                path=getattr(self, "_runtime_status_path", None),
+                platform=self.platform.value,
+                **kwargs,
+            )
         except Exception as exc:
             # Use getattr so object.__new__(...) test harnesses that skip __init__
             # don't blow up on attribute access.

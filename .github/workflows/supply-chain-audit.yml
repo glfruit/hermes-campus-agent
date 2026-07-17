@@ -33,6 +33,18 @@ on:
         description: Whether the MCP catalog / installer changed.
         type: boolean
         required: true
+      base_sha:
+        description: Explicit diff base for trusted manual validation.
+        type: string
+        default: ""
+      head_sha:
+        description: Explicit diff head for trusted manual validation.
+        type: string
+        default: ""
+      pull_request_number:
+        description: Explicit PR number for trusted manual validation.
+        type: string
+        default: ""
 
 permissions:
   pull-requests: write
@@ -48,6 +60,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          ref: ${{ inputs.head_sha || github.sha }}
 
       - name: Scan diff for critical patterns
         id: scan
@@ -56,8 +69,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
+          BASE="${{ inputs.base_sha || github.event.pull_request.base.sha }}"
+          HEAD="${{ inputs.head_sha || github.event.pull_request.head.sha }}"
 
           # Added lines only, excluding lockfiles.
           # Three-dot diff (base...head) diffs from the merge base to HEAD,
@@ -152,7 +165,7 @@ jobs:
           ---
           *Scanner only fires on high-signal indicators: .pth files, base64+exec/eval combos, subprocess with encoded commands, or install-hook files. Low-signal warnings were removed intentionally — if you're seeing this comment, the finding is worth inspecting.*"
 
-          gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY" || echo "::warning::Could not post PR comment (expected for fork PRs — GITHUB_TOKEN is read-only)"
+          gh pr comment "${{ inputs.pull_request_number || github.event.pull_request.number }}" --body "$BODY" || echo "::warning::Could not post PR comment (expected for fork PRs — GITHUB_TOKEN is read-only)"
 
       - name: Fail on critical findings
         if: steps.scan.outputs.found == 'true'
@@ -169,14 +182,15 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          ref: ${{ inputs.head_sha || github.sha }}
 
       - name: Check for unbounded PyPI deps
         id: bounds
         run: |
           set -euo pipefail
 
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
+          BASE="${{ inputs.base_sha || github.event.pull_request.base.sha }}"
+          HEAD="${{ inputs.head_sha || github.event.pull_request.head.sha }}"
 
           # Only check added lines in pyproject.toml
           ADDED=$(git diff "$BASE"..."$HEAD" -- pyproject.toml | grep '^+' | grep -v '^+++' || true)
@@ -217,7 +231,7 @@ jobs:
           ---
           *See PR #2810 and CONTRIBUTING.md for the full policy rationale.*"
 
-          gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY" || echo "::warning::Could not post PR comment (expected for fork PRs)"
+          gh pr comment "${{ inputs.pull_request_number || github.event.pull_request.number }}" --body "$BODY" || echo "::warning::Could not post PR comment (expected for fork PRs)"
 
       - name: Fail on unbounded deps
         if: steps.bounds.outputs.found == 'true'
@@ -234,13 +248,14 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          ref: ${{ inputs.head_sha || github.sha }}
 
       - name: Require explicit MCP catalog review label
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          PR="${{ github.event.pull_request.number }}"
+          PR="${{ inputs.pull_request_number || github.event.pull_request.number }}"
           LABELS=$(gh pr view "$PR" --json labels --jq '.labels[].name' || true)
           if echo "$LABELS" | grep -Fxq 'mcp-catalog-reviewed'; then
             echo "MCP catalog review label present."

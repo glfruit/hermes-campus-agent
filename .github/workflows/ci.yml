@@ -34,6 +34,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   detect:
     name: Detect affected areas
+    if: ${{ !startsWith(github.head_ref, 'automation/upstream-sync-') }}
     runs-on: ubuntu-latest
     outputs:
       python: ${{ steps.classify.outputs.python }}
@@ -134,6 +135,8 @@ jobs:
 
   osv-scanner:
     name: OSV scan
+    needs: detect
+    if: ${{ !startsWith(github.head_ref, 'automation/upstream-sync-') }}
     uses: ./.github/workflows/osv-scanner.yml
 
   # ─────────────────────────────────────────────────────────────────────
@@ -159,7 +162,7 @@ jobs:
       - osv-scanner
       # we don't require docker to pass rn because it's so slow lol
       # - docker
-    if: always()
+    if: ${{ always() && !startsWith(github.head_ref, 'automation/upstream-sync-') }}
     runs-on: ubuntu-latest
     steps:
       - name: Evaluate job results
@@ -189,7 +192,7 @@ jobs:
   ci-timings:
     name: CI timing report
     needs: [all-checks-pass, docker]
-    if: always()
+    if: ${{ always() && !startsWith(github.head_ref, 'automation/upstream-sync-') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

@@ -55,16 +55,26 @@ jobs:
           fi
 
           branch="automation/upstream-sync-${GITHUB_RUN_ID}"
+          base_sha=$(git rev-parse HEAD)
           git checkout -b "$branch"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-edit upstream/main
           git push origin "HEAD:refs/heads/$branch"
 
+          if git diff --quiet "$base_sha"...HEAD -- optional-mcps/ hermes_cli/mcp_catalog.py; then
+            mcp_catalog_changed=false
+          else
+            mcp_catalog_changed=true
+          fi
+
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "mcp_catalog_changed=$mcp_catalog_changed" >> "$GITHUB_OUTPUT"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Open review PR
+        id: pr
         if: steps.merge.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -76,10 +86,18 @@ jobs:
             --head "$SYNC_BRANCH" \
             --title "merge: sync official Hermes main" \
             --body "Automated merge of NousResearch/hermes-agent main into the campus distribution branch. Review conflicts and CI before merging; production only consumes fork/main."
+          gh pr view "$SYNC_BRANCH" --json number --jq '"number=\(.number)"' >> "$GITHUB_OUTPUT"
 
       - name: Run read-only validation on the proposal
         if: steps.merge.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          SYNC_BRANCH: ${{ steps.merge.outputs.branch }}
-        run: gh workflow run upstream-validation.yml --ref "$SYNC_BRANCH"
+          BASE_SHA: ${{ steps.merge.outputs.base_sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          MCP_CATALOG_CHANGED: ${{ steps.merge.outputs.mcp_catalog_changed }}
+        run: |
+          gh workflow run upstream-validation.yml \
+            -f proposal_sha="$(git rev-parse HEAD)" \
+            -f base_sha="$BASE_SHA" \
+            -f pr_number="$PR_NUMBER" \
+            -f mcp_catalog_changed="$MCP_CATALOG_CHANGED"
