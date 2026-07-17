@@ -1,0 +1,85 @@
+name: Sync official upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-official-upstream
+  cancel-in-progress: false
+
+jobs:
+  propose-sync:
+    name: Propose upstream merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout campus main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Stop when another sync PR is open
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          open_count=$(gh pr list --state open --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("automation/upstream-sync-"))] | length')
+          if [ "$open_count" -gt 0 ]; then
+            echo "An upstream sync PR is already open; leaving it for review."
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge official main into a proposal branch
+        id: merge
+        if: steps.guard.outputs.open == 'false'
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch --no-tags upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Campus main already contains official main."
+            exit 0
+          fi
+
+          branch="automation/upstream-sync-${GITHUB_RUN_ID}"
+          git checkout -b "$branch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit upstream/main
+          git push origin "HEAD:refs/heads/$branch"
+
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open review PR
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_BRANCH: ${{ steps.merge.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh pr create \
+            --base main \
+            --head "$SYNC_BRANCH" \
+            --title "merge: sync official Hermes main" \
+            --body "Automated merge of NousResearch/hermes-agent main into the campus distribution branch. Review conflicts and CI before merging; production only consumes fork/main."
+
+      - name: Run full CI on the proposal
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_BRANCH: ${{ steps.merge.outputs.branch }}
+        run: gh workflow run ci.yml --ref "$SYNC_BRANCH"
