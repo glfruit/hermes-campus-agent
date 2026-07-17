@@ -23,7 +23,9 @@ import re
 import smtplib
 import socket
 import ssl
+import threading
 import uuid
+import weakref
 from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -65,6 +67,11 @@ _AUTOMATED_HEADERS = {
 MAX_MESSAGE_LENGTH = 50_000
 
 SMTP_CONNECT_TIMEOUT = 30
+
+_EMAIL_IDENTITY_GUARD = threading.Lock()
+_CLAIMED_EMAIL_IDENTITIES: weakref.WeakValueDictionary[str, Any] = (
+    weakref.WeakValueDictionary()
+)
 
 
 def _profile_env(name: str, default: str = "") -> str:
@@ -526,11 +533,39 @@ class EmailAdapter(BasePlatformAdapter):
         self._seen_uids: set = set()
         self._seen_uids_max: int = 2000   # cap to prevent unbounded memory growth
         self._poll_task: Optional[asyncio.Task] = None
+        self._email_identity_claimed = False
 
         # Map chat_id (sender email) -> last subject + message-id for threading
         self._thread_context: Dict[str, Dict[str, str]] = {}
 
         logger.info("[Email] Adapter initialized for %s", self._address)
+
+    def _claim_email_identity(self) -> bool:
+        """Claim this mailbox within a multiplex gateway process."""
+        if self._email_identity_claimed:
+            return True
+        identity = self._address.lower()
+        with _EMAIL_IDENTITY_GUARD:
+            owner = _CLAIMED_EMAIL_IDENTITIES.get(identity)
+            if owner is not None and owner is not self:
+                message = "Email address already in use. Stop the other profile first."
+                logger.error("[Email] %s", message)
+                self._set_fatal_error("email_address_lock", message, retryable=True)
+                return False
+            _CLAIMED_EMAIL_IDENTITIES[identity] = self
+            self._email_identity_claimed = True
+        return True
+
+    def _release_email_locks(self) -> None:
+        """Release both machine-local and multiplex-process mailbox claims."""
+        self._release_platform_lock()
+        if not self._email_identity_claimed:
+            return
+        with _EMAIL_IDENTITY_GUARD:
+            identity = self._address.lower()
+            if _CLAIMED_EMAIL_IDENTITIES.get(identity) is self:
+                _CLAIMED_EMAIL_IDENTITIES.pop(identity, None)
+            self._email_identity_claimed = False
 
     def _trim_seen_uids(self) -> None:
         """Keep only the most recent UIDs to prevent unbounded memory growth.
@@ -626,9 +661,12 @@ class EmailAdapter(BasePlatformAdapter):
             )
             return False
 
+        if not self._claim_email_identity():
+            return False
         if not self._acquire_platform_lock(
             "email-address", self._address.lower(), "Email address"
         ):
+            self._release_email_locks()
             return False
 
         try:
@@ -647,7 +685,7 @@ class EmailAdapter(BasePlatformAdapter):
             imap.logout()
             logger.info("[Email] IMAP connection test passed. %d existing messages skipped.", len(self._seen_uids))
         except Exception as e:
-            self._release_platform_lock()
+            self._release_email_locks()
             logger.error("[Email] IMAP connection failed: %s", e)
             return False
 
@@ -660,7 +698,7 @@ class EmailAdapter(BasePlatformAdapter):
                 smtp.quit()
             logger.info("[Email] SMTP connection test passed.")
         except Exception as e:
-            self._release_platform_lock()
+            self._release_email_locks()
             logger.error("[Email] SMTP connection failed: %s", e)
             return False
 
@@ -679,7 +717,7 @@ class EmailAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
             self._poll_task = None
-        self._release_platform_lock()
+        self._release_email_locks()
         logger.info("[Email] Disconnected.")
 
     async def _poll_loop(self) -> None:
@@ -1300,6 +1338,36 @@ def _build_adapter(config):
     return EmailAdapter(config)
 
 
+def _setup_email() -> None:
+    """Configure ordinary mailbox settings in YAML and save only the password as a secret."""
+    from hermes_cli.config import read_raw_config, save_config, save_env_value
+    from hermes_cli.setup import print_success, print_warning, prompt
+
+    address = prompt("  Email address")
+    password = prompt("  Email password or app password", password=True)
+    imap_host = prompt("  IMAP host")
+    smtp_host = prompt("  SMTP host")
+    if not all((address, password, imap_host, smtp_host)):
+        print_warning("  Email setup skipped — all four values are required.")
+        return
+
+    config = read_raw_config()
+    platforms = config.setdefault("platforms", {})
+    email_config = platforms.setdefault("email", {})
+    extra = email_config.setdefault("extra", {})
+    extra.update(
+        {
+            "address": address.strip(),
+            "imap_host": imap_host.strip(),
+            "smtp_host": smtp_host.strip(),
+        }
+    )
+    email_config["enabled"] = True
+    save_config(config, strip_defaults=False)
+    save_env_value("EMAIL_PASSWORD", password)
+    print_success("  Email settings saved to config.yaml; password saved to .env.")
+
+
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system."""
     ctx.register_platform(
@@ -1309,8 +1377,9 @@ def register(ctx) -> None:
         check_fn=_email_dependencies_available,
         validate_config=_validate_email_config,
         is_connected=_is_connected,
-        required_env=["EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_SMTP_HOST"],
+        required_env=["EMAIL_PASSWORD"],
         install_hint="Email uses the Python stdlib (smtplib/imaplib) — no extra deps",
+        setup_fn=_setup_email,
         allowed_users_env="EMAIL_ALLOWED_USERS",
         allow_all_env="EMAIL_ALLOW_ALL_USERS",
         cron_deliver_env_var="EMAIL_HOME_ADDRESS",

@@ -2287,6 +2287,15 @@ class TestWebServerEndpoints:
         assert "GATEWAY_PROXY_URL" not in managed
         assert "GATEWAY_PROXY_URL" in _MESSAGING_KEYS_PAGE_KEYS
 
+    def test_email_channel_exposes_only_password_as_environment_secret(self):
+        """Dashboard must not route ordinary Email settings into .env."""
+        from hermes_cli.web_server import _build_catalog_entry
+
+        email = _build_catalog_entry("email")
+
+        assert email["env_vars"] == ("EMAIL_PASSWORD",)
+        assert email["required_env"] == ("EMAIL_PASSWORD",)
+
     def test_model_set_requires_confirmation_for_expensive_model(self, monkeypatch):
         monkeypatch.setattr(
             "hermes_cli.model_cost_guard.expensive_model_warning",

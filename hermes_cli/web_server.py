@@ -6594,18 +6594,11 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "name": "Email",
         "description": "Talk to Hermes through an IMAP/SMTP mailbox.",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/",
-        "env_vars": (
-            "EMAIL_ADDRESS",
-            "EMAIL_PASSWORD",
-            "EMAIL_IMAP_HOST",
-            "EMAIL_SMTP_HOST",
-        ),
-        "required_env": (
-            "EMAIL_ADDRESS",
-            "EMAIL_PASSWORD",
-            "EMAIL_IMAP_HOST",
-            "EMAIL_SMTP_HOST",
-        ),
+        # Ordinary connection settings live in config.yaml. The Channels page
+        # owns only the mailbox password secret in .env.
+        "env_vars": ("EMAIL_PASSWORD",),
+        "required_env": ("EMAIL_PASSWORD",),
+        "include_discovered_env": False,
     },
     "sms": {
         "name": "SMS (Twilio)",
@@ -6994,7 +6987,11 @@ def _merge_platform_env_vars(
     plugin_entry: Any | None,
 ) -> tuple[str, ...]:
     """Canonical env-var list for a messaging platform card."""
-    discovered = _discover_platform_env_vars(platform_id)
+    discovered = (
+        _discover_platform_env_vars(platform_id)
+        if override.get("include_discovered_env", True)
+        else ()
+    )
     if "env_vars" in override:
         return tuple(dict.fromkeys((*override["env_vars"], *discovered)))
     if plugin_entry is not None and plugin_entry.required_env:
@@ -7118,6 +7115,13 @@ def _messaging_platform_payload(
             enabled = False
             home_channel = None
         configured = all(env_on_disk.get(key) for key in entry["required_env"])
+        if platform_id == "email":
+            extra = plat_cfg.get("extra")
+            if not isinstance(extra, dict):
+                extra = {}
+            configured = configured and all(
+                extra.get(key) for key in ("address", "imap_host", "smtp_host")
+            )
     else:
         try:
             gateway_config, platform, platform_config = _gateway_platform_config(

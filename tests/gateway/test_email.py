@@ -128,7 +128,12 @@ def test_multiplex_email_adapter_uses_its_profile_credentials(tmp_path, monkeypa
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(profile_home))
     (profile_home / ".env").write_text(
-        "EMAIL_PASSWORD=profile-password\n", encoding="utf-8"
+        """EMAIL_PASSWORD=profile-password
+EMAIL_ADDRESS=legacy@example.com
+EMAIL_IMAP_HOST=imap.legacy.example
+EMAIL_SMTP_HOST=smtp.legacy.example
+""",
+        encoding="utf-8",
     )
     (profile_home / "config.yaml").write_text(
         """platforms:
@@ -1110,22 +1115,27 @@ class TestConnectDisconnect(unittest.TestCase):
             self.assertFalse(result)
             self.assertFalse(adapter._running)
 
-    def test_connect_stops_before_network_when_mailbox_is_already_in_use(self):
-        """A duplicate mailbox lock rejects startup before opening IMAP."""
+    def test_second_adapter_cannot_connect_same_mailbox_in_one_process(self):
+        """Multiplex profiles in one process cannot share an Email address."""
         import asyncio
 
-        adapter = self._make_adapter()
+        first = self._make_adapter()
+        second = self._make_adapter()
+        mock_imap = MagicMock()
+        mock_imap.uid.return_value = ("OK", [b""])
+        mock_smtp = MagicMock()
 
-        with patch.object(
-            adapter, "_acquire_platform_lock", return_value=False
-        ) as acquire_lock, patch("imaplib.IMAP4_SSL") as mock_imap:
-            result = asyncio.run(adapter.connect())
+        async def exercise():
+            self.assertTrue(await first.connect())
+            calls_after_first = mock_imap_factory.call_count
+            self.assertFalse(await second.connect())
+            self.assertEqual(mock_imap_factory.call_count, calls_after_first)
+            await first.disconnect()
 
-        self.assertFalse(result)
-        acquire_lock.assert_called_once_with(
-            "email-address", "hermes@test.com", "Email address"
-        )
-        mock_imap.assert_not_called()
+        with patch(
+            "imaplib.IMAP4_SSL", return_value=mock_imap
+        ) as mock_imap_factory, patch("smtplib.SMTP", return_value=mock_smtp):
+            asyncio.run(exercise())
 
     def test_connect_smtp_failure(self):
         """SMTP connection failure returns False."""
